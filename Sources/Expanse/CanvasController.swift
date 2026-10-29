@@ -1225,6 +1225,28 @@ final class CanvasController: NSObject {
         isActive ? exit() : enter(zoomOut: true)
     }
 
+    /// Unhook from the frontmost window without jumping all the way to the layout overview.
+    /// Keeping the focused window's view at the center makes the first 34% zoom feel like a
+    /// direct pullback from the app the person was using.
+    func enterFocusedOverview() {
+        guard !isPaused, !gliding else { return }
+        if isActive {
+            let selection = windows.filter { view.selected.contains($0.id) }
+            if selection.count > 1 {
+                // A group has no one app to hand focus back to. Keep the canvas open and frame
+                // the group instead.
+                returnCamera = nil
+                animate(to: selectionCamera(for: selection))
+            } else if let hovered = view.hovered {
+                exit(focus: hovered)
+            } else {
+                exit()
+            }
+            return
+        }
+        enter(zoomOut: false, overviewTarget: currentWindow())
+    }
+
     // MARK: Switching in and out
 
     /// Put every window back exactly where macOS had it before Expanse, and stop managing.
@@ -3041,25 +3063,29 @@ final class CanvasController: NSObject {
 
     // MARK: Modes
 
-    func enter(zoomOut: Bool) {
+    func enter(zoomOut: Bool, overviewTarget: ManagedWindow? = nil) {
         if isActive {
-            if zoomOut { animate(to: overviewCamera()) }
+            if let overviewTarget {
+                animate(to: focusedOverviewCamera(for: overviewTarget))
+            } else if zoomOut {
+                animate(to: overviewCamera())
+            }
             return
         }
         // Live tracking keeps the canvas current, so don't wait for a window scan (ScreenCaptureKit
         // can take a second to answer when it's busy); one runs right after to catch anything new.
         if hasSynced, !gliding {
-            enterNow(zoomOut: zoomOut)
+            enterNow(zoomOut: zoomOut, overviewTarget: overviewTarget)
             sync()
         } else {
             sync { [weak self] in
                 guard let self, !self.isActive else { return }
-                self.enterNow(zoomOut: zoomOut)
+                self.enterNow(zoomOut: zoomOut, overviewTarget: overviewTarget)
             }
         }
     }
 
-    private func enterNow(zoomOut: Bool) {
+    private func enterNow(zoomOut: Bool, overviewTarget: ManagedWindow? = nil) {
         isActive = true
         camera.scale = 1
         updateOverlayFrame()
@@ -3075,7 +3101,10 @@ final class CanvasController: NSObject {
         overlay.makeKeyAndOrderFront(nil)
         overlay.makeFirstResponder(view)
         returnCamera = nil
-        if zoomOut {
+        if let overviewTarget {
+            returnCamera = camera
+            animate(to: focusedOverviewCamera(for: overviewTarget), duration: 0.28)
+        } else if zoomOut {
             returnCamera = camera
             animate(to: overviewCamera())
         }
@@ -3411,6 +3440,22 @@ final class CanvasController: NSObject {
 
     func overviewCamera() -> Camera {
         fitCamera(maxScale: 0.6)
+    }
+
+    /// The focused view at 50%.
+    /// Deliberately shallower than `overviewCamera()`: it reveals nearby windows while preserving the app's context.
+    private func focusedOverviewCamera(for window: ManagedWindow?) -> Camera {
+        let center = window.map { focusCamera(for: $0).center(in: viewSize) } ?? camera.center(in: viewSize)
+        return Camera.centered(on: center, scale: 0.50, viewSize: viewSize)
+    }
+
+    /// The tightest whole-view framing for a selected group, with the standard canvas breathing room.
+    private func selectionCamera(for selection: [ManagedWindow]) -> Camera {
+        guard let first = selection.first else { return camera }
+        let bounds = selection.dropFirst().reduce(first.canvasFrame) { $0.union($1.canvasFrame) }
+            .insetBy(dx: -80, dy: -80)
+        let scale = min(viewSize.width / bounds.width, viewSize.height / bounds.height, 1)
+        return Camera.centered(on: bounds.center, scale: max(scale, Camera.minScale), viewSize: viewSize)
     }
 
     func fitCamera(maxScale: CGFloat = 1) -> Camera {

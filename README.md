@@ -62,7 +62,8 @@ A short walkthrough gets you set up in about a minute:
 
 | Do this | To |
 |---|---|
-| Rest the pointer in a screen corner, or press <kbd>⌥</kbd> <kbd>`</kbd> | Zoom out to every window (do it again to go back) |
+| Rest the pointer in a screen corner | Zoom out to every window (do it again to go back) |
+| <kbd>⌥</kbd> <kbd>`</kbd> | Pull back from the focused app; press again to return to the hovered window or frame the selected group |
 | Click a window | Glide to it and start using it |
 | <kbd>⌃</kbd> + <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> | Hop to the next window in that direction |
 | Pinch, or scroll with two fingers | Zoom and move around the canvas |

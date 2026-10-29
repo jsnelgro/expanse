@@ -719,7 +719,7 @@ private struct ReadyPage: View {
     let corner: HotCorner.Corner
 
     private let rows: [([String], String)] = [
-        (["⌥", "`"], "Zoom out to every window, and back"),
+        (["⌥", "`"], "Pull back from the focused app"),
         (["Click"], "Dive into a window"),
         (["⌃", "← → ↑ ↓"], "Hop to the nearest window that way"),
         (["⌃", "⌥", "C"], "Centre the window you're in"),
@@ -734,8 +734,8 @@ private struct ReadyPage: View {
         VStack(alignment: .leading, spacing: 24) {
             PageHeader(eyebrow: "All set",
                        title: "Try it now.",
-                       why: corner == .off ? "Press ⌥` to zoom out, then click any window to dive back in."
-                           : "Flick the pointer into a corner (or press ⌥`), then click any window to dive back in.")
+                       why: corner == .off ? "Press ⌥` to pull back from the window you are using, then zoom or pan from there."
+                           : "Flick the pointer into a corner to see everything, or press ⌥` for a quick pullback from the window you are using.")
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
                 ForEach(rows.indices, id: \.self) { i in
                     GridRow {

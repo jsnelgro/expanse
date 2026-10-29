@@ -57,9 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func turnOn() {
         guard !isOn else { return }
         isOn = true
-        // ⌥` toggles the canvas.
+        // ⌥` pulls back from the focused window.
         hotKey = HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey, id: 1) { [weak self] in
-            self?.controller.toggle()
+            self?.controller.enterFocusedOverview()
         }
         // ⌃ + arrows move to the nearest window in that direction.
         let arrows: [(Int, CanvasController.Direction)] = [(kVK_LeftArrow, .left), (kVK_RightArrow, .right),
