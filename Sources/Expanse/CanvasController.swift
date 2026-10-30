@@ -3853,11 +3853,17 @@ final class CanvasController: NSObject {
         frames.values.sorted { ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) }.map { ($0, $0.rect) }
     }
 
-    /// The frame whose box is under `p` (view coordinates).
+    /// The frame whose box, or the strip above it where its name is, is under `p` (view
+    /// coordinates). The name strip is a handle for moving a frame that's full of windows.
     func frame(atView p: CGPoint) -> Frame? {
-        let c = camera.toCanvas(p)
-        return frameBoxes().last { $0.box.contains(c) }?.frame
+        frameBoxes().last { _, box in
+            let r = camera.toView(box)
+            return r.contains(p) || CGRect(x: r.minX, y: r.minY - Self.frameTitleHeight, width: r.width, height: Self.frameTitleHeight).contains(p)
+        }?.frame
     }
+
+    /// How tall the strip above a frame's box is on screen, at any zoom (see frame(atView:)).
+    static let frameTitleHeight: CGFloat = 26
 
     /// The frame whose view is on screen at 100%, if any.
     private func currentFrame() -> Frame? {
