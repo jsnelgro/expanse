@@ -628,7 +628,11 @@ final class CanvasController: NSObject {
             // Off means off: macOS often focuses a hidden window by itself (after a close or
             // minimize), so never move the canvas; just say where the window went.
             lastHiddenHint = w.id
-            Toast.show("\(w.appName) is off-screen · ⌥` to find it")
+            if let overview = Shortcuts.shortcut(for: .overview) {
+                Toast.show("\(w.appName) is off-screen · \(overview.symbols) to find it")
+            } else {
+                Toast.show("\(w.appName) is off-screen")
+            }
         }
     }
 

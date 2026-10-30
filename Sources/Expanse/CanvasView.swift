@@ -513,38 +513,39 @@ final class CanvasView: NSView {
         guard !controller.gliding else { return }
         guard controller.isActive else { super.keyDown(with: e); return }
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        switch Int(e.keyCode) {
-        case kVK_Escape:
+        // Which key does what comes from shortcuts.conf (see Shortcuts.swift).
+        switch Shortcuts.canvasAction(for: e) {
+        case .exit:
             if selected.isEmpty { controller.exit() } else { selected.removeAll(); render() }
-        case kVK_LeftArrow: controller.navigate(.left)
-        case kVK_RightArrow: controller.navigate(.right)
-        case kVK_UpArrow: controller.navigate(.up)
-        case kVK_DownArrow: controller.navigate(.down)
-        case kVK_Space:
+        case .canvasLeft: controller.navigate(.left)
+        case .canvasRight: controller.navigate(.right)
+        case .canvasUp: controller.navigate(.up)
+        case .canvasDown: controller.navigate(.down)
+        case .pan:
             if !e.isARepeat { spaceHeld = true; NSCursor.openHand.set() }
-        case kVK_ANSI_A where e.modifierFlags.contains(.command):
+        case .selectAll:
             selected = Set(controller.windows.map(\.id))
             render()
-        case kVK_Return:
+        case .dive:
             controller.exit(focus: hovered ?? controller.windows.last)
-        case kVK_ANSI_0:
+        case .fit:
             controller.cameraMovedByUser()
             controller.animate(to: controller.fitCamera())
-        case kVK_ANSI_T:
+        case .tidy:
             controller.tidy()
-        case kVK_ANSI_1:
+        case .actualSize:
             controller.zoomAnimated(to: 1)
-        case kVK_ANSI_Minus:
+        case .zoomOut:
             var t = controller.camera
             t.zoom(to: t.scale / 1.5, anchor: center)
             controller.cameraMovedByUser()
             controller.animate(to: t, duration: 0.22)
-        case kVK_ANSI_Equal:
+        case .zoomIn:
             var t = controller.camera
             t.zoom(to: t.scale * 1.5, anchor: center)
             controller.cameraMovedByUser()
             controller.animate(to: t, duration: 0.22)
-        case kVK_ANSI_W where e.modifierFlags.contains(.command):
+        case .close:
             // The selection if there is one, otherwise the window under the pointer.
             if let w = controller.windows.first(where: { selected.contains($0.id) }) ?? hovered {
                 close(w)
@@ -556,7 +557,8 @@ final class CanvasView: NSView {
     }
 
     override func keyUp(with e: NSEvent) {
-        if Int(e.keyCode) == kVK_Space {
+        // Letting go of the pan key ends panning, even if a modifier changed while it was held.
+        if spaceHeld, Int(e.keyCode) == Shortcuts.shortcut(for: .pan)?.keyCode {
             spaceHeld = false
             NSCursor.arrow.set()
         } else {

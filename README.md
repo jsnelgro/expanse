@@ -90,6 +90,11 @@ A short walkthrough gets you set up in about a minute:
 
 </details>
 
+**Changing the shortcuts.** The shortcuts above (the global ones and the keys that work while
+zoomed out) are read from `~/.config/expanse/shortcuts.conf`, which Expanse creates with the
+defaults on first launch. Edit a line, e.g. `centre-window = ctrl+cmd+c` or `tidy = shift+t`, or
+set it to `none` to turn it off, then quit and reopen Expanse.
+
 **Full-screen apps** keep their own Spaces, as usual. Jump to them, and back, from the
 **Spaces** panel next to the minimap at the bottom of the screen.
 

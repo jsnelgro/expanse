@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var centreHotKey: HotKey?
     private var centreWindowHotKey: HotKey?
     private var arrowHotKeys: [HotKey] = []
-    private let centreItem = NSMenuItem(title: "Auto-Centre Focused Window", action: #selector(toggleAutoCentre), keyEquivalent: "`")
+    private let centreItem = NSMenuItem(title: "Auto-Centre Focused Window", action: #selector(toggleAutoCentre), keyEquivalent: "")
     private var signalSources: [DispatchSourceSignal] = []
     private let accessibilityItem = NSMenuItem(title: "", action: #selector(openAccessibilitySettings), keyEquivalent: "")
     private let cornerMenu = NSMenu()
@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let restoreLayoutItem = NSMenuItem(title: "Restore Layout", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Shortcuts.load()
         setUpStatusItem()
 
         // No system permission prompts out of the blue: the walkthrough explains each one first.
@@ -54,28 +55,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Expanse has started: the canvas and its shortcuts.
     private var isOn = false
 
+    /// A global hotkey for the action's configured shortcut; nil if the config turns it off.
+    private func registerHotKey(_ action: Shortcuts.Action, id: UInt32, handler: @escaping () -> Void) -> HotKey? {
+        guard let shortcut = Shortcuts.shortcut(for: action) else { return nil }
+        return HotKey(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers, id: id, handler: handler)
+    }
+
+    /// Shows the action's configured shortcut on a menu item, or none if it's turned off.
+    private func showShortcut(_ action: Shortcuts.Action, on item: NSMenuItem) {
+        let shortcut = Shortcuts.shortcut(for: action)
+        item.keyEquivalent = shortcut?.menuKey ?? ""
+        item.keyEquivalentModifierMask = shortcut?.menuModifiers ?? []
+    }
+
     private func turnOn() {
         guard !isOn else { return }
         isOn = true
+        // The shortcuts come from ~/.config/expanse/shortcuts.conf (see Shortcuts.swift). By default:
         // ⌥` pulls back from the focused window.
-        hotKey = HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey, id: 1) { [weak self] in
+        hotKey = registerHotKey(.overview, id: 1) { [weak self] in
             self?.controller.enterFocusedOverview()
         }
         // ⌃ + arrows move to the nearest window in that direction.
-        let arrows: [(Int, CanvasController.Direction)] = [(kVK_LeftArrow, .left), (kVK_RightArrow, .right),
-                                                           (kVK_UpArrow, .up), (kVK_DownArrow, .down)]
-        for (i, (key, direction)) in arrows.enumerated() {
-            arrowHotKeys.append(HotKey(keyCode: key, modifiers: controlKey, id: UInt32(10 + i)) { [weak self] in
+        let arrows: [(Shortcuts.Action, CanvasController.Direction)] = [(.hopLeft, .left), (.hopRight, .right),
+                                                                        (.hopUp, .up), (.hopDown, .down)]
+        for (i, (action, direction)) in arrows.enumerated() {
+            if let hotKey = registerHotKey(action, id: UInt32(10 + i), handler: { [weak self] in
                 self?.controller.navigate(direction)
-            })
+            }) { arrowHotKeys.append(hotKey) }
         }
         // ⌥⇧` toggles auto-centring.
-        centreHotKey = HotKey(keyCode: kVK_ANSI_Grave, modifiers: optionKey | shiftKey, id: 2) { [weak self] in
+        centreHotKey = registerHotKey(.toggleAutoCentre, id: 2) { [weak self] in
             self?.toggleAutoCentre()
         }
         // ⌃⌥C centres the window you're in (as Rectangle's Center does; ⌃Space is editors'
         // autocomplete, and macOS's input-source switch for anyone with two keyboard layouts).
-        centreWindowHotKey = HotKey(keyCode: kVK_ANSI_C, modifiers: controlKey | optionKey, id: 3) { [weak self] in
+        centreWindowHotKey = registerHotKey(.centreWindow, id: 3) { [weak self] in
             self?.controller.centreCurrentWindow()
         }
         controller.start()
@@ -258,8 +273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
-        let open = NSMenuItem(title: "Open Expanse", action: #selector(toggleCanvas), keyEquivalent: "`")
-        open.keyEquivalentModifierMask = [.option]
+        let open = NSMenuItem(title: "Open Expanse", action: #selector(toggleCanvas), keyEquivalent: "")
+        showShortcut(.overview, on: open)
         menu.addItem(open)
         menu.addItem(pauseItem)
         menu.addItem(.separator())
@@ -272,10 +287,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             cornerMenu.addItem(item)
         }
         menu.addItem(cornerItem)
-        let centreWindow = NSMenuItem(title: "Centre Current Window", action: #selector(centreCurrentWindow), keyEquivalent: "c")
-        centreWindow.keyEquivalentModifierMask = [.control, .option]
+        let centreWindow = NSMenuItem(title: "Centre Current Window", action: #selector(centreCurrentWindow), keyEquivalent: "")
+        showShortcut(.centreWindow, on: centreWindow)
         menu.addItem(centreWindow)
-        centreItem.keyEquivalentModifierMask = [.option, .shift]
+        showShortcut(.toggleAutoCentre, on: centreItem)
         centreItem.target = self
         menu.addItem(centreItem)
         menu.addItem(wallpaperItem)
