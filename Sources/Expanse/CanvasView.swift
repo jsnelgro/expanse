@@ -28,11 +28,19 @@ final class CanvasView: NSView {
     private lazy var minimapGlass = GlassPanel(content: minimap) { [weak self] in self?.minimap.applyAppearance($0) }
     private lazy var spacesGlass = GlassPanel(content: spacesBar) { [weak self] in self?.spacesBar.applyAppearance($0) }
     var hovered: ManagedWindow?
+    /// The frame under the pointer, between its windows (over one, it's that window's frame).
+    private var hoveredFrame: Frame?
+    /// Frames zoomed out: their boxes, under the windows, with each frame's name above.
+    private let frameBoxes = CAShapeLayer()
+    private let frameHover = CAShapeLayer()
+    private let frameNames = CALayer()
+    private var frameNameLayers: [String: CATextLayer] = [:]
 
     private enum Drag {
         case none
         case pan(last: CGPoint)
         case window(ManagedWindow, startFrame: CGRect, startPoint: CGPoint)
+        case frame(Frame, startRect: CGRect, starts: [(ManagedWindow, CGRect)], startPoint: CGPoint)
         case group(clicked: ManagedWindow, starts: [(ManagedWindow, CGRect)], startPoint: CGPoint)
         case marquee(start: CGPoint, base: Set<CGWindowID>)
         case minimap
@@ -53,6 +61,16 @@ final class CanvasView: NSView {
         // Underneath everything, the minimap and Spaces too when they go under the windows (see render).
         wallpaper.zPosition = -2
         root.addSublayer(wallpaper)
+        frameBoxes.lineWidth = 1.5
+        frameHover.fillColor = nil
+        frameHover.strokeColor = NSColor.controlAccentColor.cgColor
+        frameHover.lineWidth = 2
+        for l in [frameBoxes, frameHover] {
+            l.actions = ["path": NSNull()]
+            root.addSublayer(l)
+        }
+        frameNames.actions = ["sublayers": NSNull()]
+        root.addSublayer(frameNames)
         for l in [world, labels, guides] {
             l.actions = ["sublayers": NSNull()]
             root.addSublayer(l)
@@ -86,7 +104,7 @@ final class CanvasView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         world.anchorPoint = .zero
-        for l in [world, labels, guides, marquee, selectionBox] { l.frame = bounds }
+        for l in [world, labels, guides, marquee, selectionBox, frameBoxes, frameHover, frameNames] { l.frame = bounds }
         // Pinned exactly where the real desktop picture is: the top strip sits under the menu bar.
         wallpaper.frame = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height + menuBarHeight)
         minimapGlass.frame = CGRect(origin: CGPoint(x: bounds.maxX - Minimap.size.width - 16, y: 16), size: Minimap.size)
@@ -141,8 +159,13 @@ final class CanvasView: NSView {
 
     private func applyAppearance() {
         canvasBackground = (isDark ? NSColor(white: 0.13, alpha: 1) : NSColor(white: 0.85, alpha: 1)).cgColor
+        // Light over a desktop picture or a dark background, dark over the light grey one.
+        let light = hasWallpaper || isDark
+        frameBoxes.fillColor = NSColor(white: light ? 1 : 0, alpha: light ? 0.12 : 0.05).cgColor
+        frameBoxes.strokeColor = NSColor(white: light ? 1 : 0, alpha: light ? 0.45 : 0.22).cgColor
         render()
         controller?.windows.forEach { styleLabel($0.node.label) }
+        frameNameLayers.values.forEach(styleLabel)
     }
 
     /// White with a shadow over a desktop picture; quiet grey over the plain background.
@@ -213,6 +236,8 @@ final class CanvasView: NSView {
         let s = c.camera.scale
         world.sublayerTransform = CATransform3DMakeAffineTransform(
             CGAffineTransform(a: s, b: 0, c: 0, d: s, tx: -s * c.camera.origin.x, ty: bounds.height + s * c.camera.origin.y))
+        if !c.isActive { hoveredFrame = nil }
+        renderFrames()
         // Hovering a window in a selection shows × on every selected window: it closes them all.
         let groupHovered = hovered.map(isInGroup) ?? false
         for w in c.windows {
@@ -223,7 +248,7 @@ final class CanvasView: NSView {
             let isSelected = selected.contains(w.id)
             w.node.style(scale: s, hovered: w === hovered, selected: isSelected,
                          showsClose: w === hovered || (groupHovered && isSelected),
-                         visible: visible, screenRect: flip(r))
+                         visible: visible, showsLabel: c.frame(of: w) == nil, screenRect: flip(r))
         }
         let picked = c.windows.filter { selected.contains($0.id) }.map { c.camera.toView($0.canvasFrame) }
         if picked.count > 1, let first = picked.first {
@@ -239,6 +264,49 @@ final class CanvasView: NSView {
         minimapGlass.layer?.zPosition = c.gliding ? -1 : 0
         spacesGlass.layer?.zPosition = c.gliding ? -1 : 0
         CATransaction.commit()
+    }
+
+    /// The frames' boxes and names, zoomed out. At 100% (gliding included) you're in a frame or
+    /// among windows, and the desktop shows as it is.
+    private func renderFrames() {
+        guard let c = controller else { return }
+        let boxes = c.isActive && !c.gliding ? c.frameBoxes() : []
+        let lit = hovered.flatMap(c.frame(of:)) ?? hoveredFrame
+        let s = c.camera.scale
+        let path = CGMutablePath()
+        var litPath: CGPath?
+        var shown = Set<String>()
+        for (f, box) in boxes {
+            let r = flip(c.camera.toView(box))
+            let radius = max(18 * s, 3)
+            path.addRoundedRect(in: r, cornerWidth: radius, cornerHeight: radius)
+            if f === lit { litPath = CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil) }
+            let name = frameNameLayers[f.id] ?? {
+                let l = CATextLayer()
+                l.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+                l.fontSize = 12
+                l.alignmentMode = .left
+                l.truncationMode = .end
+                l.anchorPoint = .zero
+                l.contentsScale = window?.backingScaleFactor ?? 2
+                styleLabel(l)
+                frameNames.addSublayer(l)
+                frameNameLayers[f.id] = l
+                return l
+            }()
+            shown.insert(f.id)
+            if name.string as? String != f.name { name.string = f.name }
+            let width = max(min(r.width - 8, 320), 0)
+            if name.bounds.width != width { name.bounds = CGRect(x: 0, y: 0, width: width, height: 16) }
+            name.position = CGPoint(x: r.minX + 6, y: r.maxY + 4)
+            name.isHidden = r.width < 80
+        }
+        for (id, l) in frameNameLayers where !shown.contains(id) {
+            l.removeFromSuperlayer()
+            frameNameLayers.removeValue(forKey: id)
+        }
+        frameBoxes.path = boxes.isEmpty ? nil : path
+        frameHover.path = litPath
     }
 
     /// Part of a selection of more than one window (which × and ⌘W close together).
@@ -390,6 +458,8 @@ final class CanvasView: NSView {
                 render()
                 return
             }
+            // Windows in a frame drag like any other (dropped outside its box, one leaves it); a
+            // click goes into the frame (see focusCamera).
             if shift {
                 // ⇧-click toggles the window in the selection.
                 if selected.remove(w.id) == nil { selected.insert(w.id) }
@@ -403,6 +473,12 @@ final class CanvasView: NSView {
                 controller.bringToFront(w)
                 drag = .window(w, startFrame: w.canvasFrame, startPoint: p)
             }
+        } else if !shift, let f = controller.frame(atView: p) {
+            // The frame's box, between its windows: a drag moves it with them, a click goes in.
+            selected.removeAll()
+            let members = controller.members(of: f)
+            members.forEach(controller.bringToFront)
+            drag = .frame(f, startRect: f.rect, starts: members.map { ($0, $0.canvasFrame) }, startPoint: p)
         } else {
             drag = .marquee(start: p, base: shift ? selected : [])
             if !shift { selected.removeAll() }
@@ -449,9 +525,19 @@ final class CanvasView: NSView {
             // Snap the group's bounding box as one block against everything else.
             let bounds = starts.map(\.1).reduce(starts[0].1) { $0.union($1) }
             let proposed = bounds.offsetBy(dx: d.dx, dy: d.dy)
-            let (snapped, lines) = snapEnabled ? controller.snap(proposed, excluding: selected) : (proposed, [])
+            let (snapped, lines) = snapEnabled ? controller.snap(proposed, excluding: Set(starts.map { $0.0.id })) : (proposed, [])
             let dx = d.dx + snapped.minX - proposed.minX, dy = d.dy + snapped.minY - proposed.minY
             for (w, start) in starts { w.canvasFrame = start.offsetBy(dx: dx, dy: dy) }
+            showGuides(lines)
+            render()
+        case .frame(let f, let startRect, let starts, let startPoint):
+            if !dragged && p.distance(to: startPoint) < 3 { return }
+            dragged = true
+            // The box snaps to the windows around it, as a window does.
+            let proposed = startRect.offsetBy(dx: (p.x - startPoint.x) / s, dy: (p.y - startPoint.y) / s)
+            let (snapped, lines) = snapEnabled ? controller.snap(proposed, excluding: Set(starts.map { $0.0.id })) : (proposed, [])
+            f.rect = snapped
+            for (w, start) in starts { w.canvasFrame = start.offsetBy(dx: snapped.minX - startRect.minX, dy: snapped.minY - startRect.minY) }
             showGuides(lines)
             render()
         case .marquee(let start, let base):
@@ -485,6 +571,13 @@ final class CanvasView: NSView {
                 selected.removeAll()
                 controller.exit(focus: w)
             }
+        case .frame(let f, _, let starts, _):
+            if dragged {
+                for (moved, start) in starts { controller.noteUserMove(moved, from: start.origin) }
+                controller.scheduleSave()
+            } else {
+                controller.goInto(f)
+            }
         case .pan:
             if spaceHeld { NSCursor.openHand.set() }
         default:
@@ -498,10 +591,13 @@ final class CanvasView: NSView {
         guard controller.isActive else { return }
         let bar = spacesBarHit(e)
         spacesBar.hovered = bar.tile
-        let w = minimapPoint(e) == nil && !bar.over ? controller.window(atView: point(e)) : nil
-        if w !== hovered {
+        let overCanvas = minimapPoint(e) == nil && !bar.over
+        let w = overCanvas ? controller.window(atView: point(e)) : nil
+        let underPointer = overCanvas && w == nil ? controller.frame(atView: point(e)) : nil
+        if w !== hovered || underPointer !== hoveredFrame {
             hovered?.node.label.string = hovered?.appName
             hovered = w
+            hoveredFrame = underPointer
             if let w { w.node.label.string = w.title.isEmpty ? w.appName : "\(w.appName) — \(w.title)" }
             render()
         }
@@ -527,7 +623,19 @@ final class CanvasView: NSView {
             selected = Set(controller.windows.map(\.id))
             render()
         case .dive:
-            controller.exit(focus: hovered ?? controller.windows.last)
+            if hovered == nil, let f = hoveredFrame {
+                controller.goInto(f)
+            } else {
+                controller.exit(focus: hovered ?? controller.windows.last)
+            }
+        case .newFrame:
+            controller.newFrame(at: pointerOnCanvas())
+        case .deleteFrame:
+            if let f = hoveredFrame ?? hovered.flatMap(controller.frame(of:)) {
+                controller.deleteFrame(f)
+            } else {
+                Toast.show("Point at a frame to delete it")
+            }
         case .fit:
             controller.cameraMovedByUser()
             controller.animate(to: controller.fitCamera())
@@ -554,6 +662,71 @@ final class CanvasView: NSView {
         default:
             super.keyDown(with: e)
         }
+    }
+
+    /// The canvas point under the pointer, if it's over the canvas.
+    private func pointerOnCanvas() -> CGPoint? {
+        guard let w = window else { return nil }
+        let p = flip(convert(w.mouseLocationOutsideOfEventStream, from: nil))
+        return bounds.contains(flip(p)) ? controller.camera.toCanvas(p) : nil
+    }
+
+    // MARK: Context menu
+
+    override func rightMouseDown(with e: NSEvent) {
+        guard controller.isActive, !controller.gliding else { super.rightMouseDown(with: e); return }
+        let p = point(e)
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector, _ object: Any) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = object
+            menu.addItem(item)
+        }
+        let w = controller.window(atView: p)
+        if let f = w.flatMap(controller.frame(of:)) ?? controller.frame(atView: p) {
+            add("Go to \(f.name)", #selector(goToFrame(_:)), f)
+            add("Rename \(f.name)…", #selector(renameFrame(_:)), f)
+            if let w, w.frameID == f.id { add("Take \(w.appName) out of \(f.name)", #selector(takeOutOfFrame(_:)), w) }
+            menu.addItem(.separator())
+            add("Delete \(f.name)", #selector(deleteFrame(_:)), f)
+        } else {
+            add("New Frame Here", #selector(newFrameHere(_:)), NSValue(point: controller.camera.toCanvas(p)))
+        }
+        NSMenu.popUpContextMenu(menu, with: e, for: self)
+    }
+
+    @objc private func goToFrame(_ item: NSMenuItem) {
+        if let f = item.representedObject as? Frame { controller.goInto(f) }
+    }
+
+    @objc private func deleteFrame(_ item: NSMenuItem) {
+        if let f = item.representedObject as? Frame { controller.deleteFrame(f) }
+    }
+
+    @objc private func takeOutOfFrame(_ item: NSMenuItem) {
+        if let w = item.representedObject as? ManagedWindow { controller.removeFromFrame(w) }
+    }
+
+    @objc private func newFrameHere(_ item: NSMenuItem) {
+        if let p = (item.representedObject as? NSValue)?.pointValue { controller.newFrame(at: p) }
+    }
+
+    @objc private func renameFrame(_ item: NSMenuItem) {
+        guard let f = item.representedObject as? Frame else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename \(f.name)"
+        let field = NSTextField(string: f.name)
+        field.frame = CGRect(x: 0, y: 0, width: 260, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        // Above the canvas, which covers ordinary windows.
+        alert.window.level = NSWindow.Level(rawValue: OverlayWindow.canvasLevel.rawValue + 1)
+        alert.window.initialFirstResponder = field
+        if alert.runModal() == .alertFirstButtonReturn { controller.rename(f, to: field.stringValue) }
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(self)
     }
 
     override func keyUp(with e: NSEvent) {

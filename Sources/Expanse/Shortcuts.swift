@@ -11,7 +11,7 @@ enum Shortcuts {
         case hopLeft = "hop-left", hopRight = "hop-right", hopUp = "hop-up", hopDown = "hop-down"
         // While zoomed out.
         case exit, dive, tidy, fit, actualSize = "actual-size", zoomOut = "zoom-out", zoomIn = "zoom-in"
-        case selectAll = "select-all", close, pan
+        case selectAll = "select-all", close, pan, newFrame = "new-frame", deleteFrame = "delete-frame"
         case canvasLeft = "canvas-left", canvasRight = "canvas-right", canvasUp = "canvas-up", canvasDown = "canvas-down"
 
         /// Global shortcuts work anywhere; the rest only while the canvas is zoomed out.
@@ -38,6 +38,8 @@ enum Shortcuts {
             case .selectAll: "Select every window"
             case .close: "Close the selected windows, or the one under the pointer"
             case .pan: "Hold and drag to move around the canvas"
+            case .newFrame: "Make a frame the size of the screen, under the pointer"
+            case .deleteFrame: "Delete the frame under the pointer (its windows stay)"
             case .canvasLeft, .canvasRight, .canvasUp, .canvasDown: "Move to the nearest window that way"
             }
         }
@@ -61,6 +63,8 @@ enum Shortcuts {
             case .selectAll: "cmd+a"
             case .close: "cmd+w"
             case .pan: "space"
+            case .newFrame: "cmd+g"
+            case .deleteFrame: "cmd+shift+g"
             case .canvasLeft: "left"
             case .canvasRight: "right"
             case .canvasUp: "up"

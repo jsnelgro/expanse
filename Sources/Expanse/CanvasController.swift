@@ -59,6 +59,10 @@ final class CanvasController: NSObject {
     private var saved: SavedLayout?
     private var savedPool: [SavedLayout.Window] = []
     private var lastSavedLayout: Data?
+    /// Frames by ID (see Frame).
+    private(set) var frames: [String: Frame] = [:]
+    /// A window per frame, for window switchers (see FrameWindows).
+    private let frameWindows = FrameWindows()
     let hotCorner = HotCorner()
 
     /// Glide to center a focused window that isn't fully on screen. Toggled with ⌥⇧`.
@@ -78,7 +82,8 @@ final class CanvasController: NSObject {
     /// a window of the same app has just gone is that app's next tab, not a new window.
     /// `real`: the new window's frame on screen.
     private func tabTakingOver(from w: ManagedWindow, at real: CGRect) -> (id: CGWindowID, canvasFrame: CGRect, originalFrame: CGRect,
-                                                                         preferredSize: CGSize, home: CGPoint?, lastPlaced: CGPoint?, parked: Bool)? {
+                                                                         preferredSize: CGSize, home: CGPoint?, lastPlaced: CGPoint?, parked: Bool,
+                                                                         frameID: String?)? {
         func near(_ a: CGPoint, _ b: CGPoint) -> Bool { abs(a.x - b.x) <= 2 && abs(a.y - b.y) <= 2 }
         func sameSize(_ s: CGSize) -> Bool { abs(s.width - real.width) <= 2 && abs(s.height - real.height) <= 2 }
         // Where the other tab was: on screen at its canvas spot, or parked (with the group).
@@ -89,13 +94,13 @@ final class CanvasController: NSObject {
         }
         if let tab = windows.first(where: { $0.pid == w.pid && $0.id != w.id && !scannedIDs.contains($0.id)
                                             && wasHere(canvas: $0.canvasFrame, placed: $0.lastPlaced, parked: $0.parked) }) {
-            return (tab.id, tab.canvasFrame, tab.originalFrame, tab.preferredSize, tab.home, tab.lastPlaced, tab.parked)
+            return (tab.id, tab.canvasFrame, tab.originalFrame, tab.preferredSize, tab.home, tab.lastPlaced, tab.parked, tab.frameID)
         }
         // Gone a moment before (the scan that saw it go came first).
         if let (id, tab) = recentlyRemoved.first(where: { $0.key != w.id && $0.value.pid == w.pid
                                                             && Date().timeIntervalSince($0.value.at) < 2
                                                             && wasHere(canvas: $0.value.canvasFrame, placed: nil, parked: $0.value.parked) }) {
-            return (id, tab.canvasFrame, tab.originalFrame, tab.preferredSize, tab.home, nil, tab.parked)
+            return (id, tab.canvasFrame, tab.originalFrame, tab.preferredSize, tab.home, nil, tab.parked, tab.frameID)
         }
         return nil
     }
@@ -112,6 +117,7 @@ final class CanvasController: NSObject {
         let preferredSize: CGSize
         let home: CGPoint?
         let parked: Bool
+        let frameID: String?
         let at: Date
         /// Closed, not just out of view (see closedWindows): its spot is kept for its app opening
         /// again (appQuit), but a window that turns up with its ID is a new one (Finder reuses them).
@@ -161,6 +167,12 @@ final class CanvasController: NSObject {
         view.controller = self
         saved = LayoutStore.load()
         savedPool = saved?.windows ?? []
+        frames = Dictionary((saved?.frames ?? []).map { ($0.id, Frame($0, defaultSize: viewport.size)) }, uniquingKeysWith: { a, _ in a })
+        frameWindows.onPick = { [weak self] id in
+            guard let self, !self.isPaused, let f = self.frames[id] else { return }
+            self.goInto(f)
+        }
+        framesChanged()
         updateOverlayFrame()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -276,6 +288,7 @@ final class CanvasController: NSObject {
     }
 
     @objc private func screensChanged() {
+        framesChanged()
         displaysWillChange()
         scheduleRelayout()
     }
@@ -615,6 +628,11 @@ final class CanvasController: NSObject {
             logger.info("\(w.appName, privacy: .public)[\(w.id)] got focus after a window of its app closed; the view stays")
             return
         }
+        if !w.parked, let f = frame(of: w), currentFrame() === f {
+            // Partly on screen in the frame you're in: it's on your desktop, and the view stays.
+            logger.info("in \(f.name, privacy: .public): \(w.appName, privacy: .public)[\(w.id)] focused where it is")
+            return
+        }
         if viewPlaced, !w.parked {
             // Partly on screen, in a view you put there: it's the one you clicked, not one to go to.
             logger.info("view placed by you: \(w.appName, privacy: .public)[\(w.id)] focused where it is")
@@ -652,8 +670,10 @@ final class CanvasController: NSObject {
     /// Live mode: pan the camera to `w`. The overlay rises at scale 1 (where proxies line up
     /// with the real windows), animates, commits, then sinks again. It never takes key focus,
     /// so typing keeps going to the window that was just clicked.
-    private func glide(to w: ManagedWindow) {
-        logger.info("glide to \(w.appName, privacy: .public)[\(w.id)]")
+    /// `camera`: where to go instead of centring `w` (a frame's view); `w` may then be nil (an
+    /// empty frame), and nothing gets focus.
+    private func glide(to w: ManagedWindow?, camera target: Camera? = nil) {
+        logger.info("glide to \(w.map { "\($0.appName)[\($0.id)]" } ?? "a frame", privacy: .public)")
         viewPlaced = false
         focusQuery += 1   // a focus answer still on its way is out of date now
         let t0 = CACurrentMediaTime()
@@ -671,11 +691,14 @@ final class CanvasController: NSObject {
         glideGeneration += 1
         let generation = glideGeneration
         glideTarget = w
-        bringToFront(w)
-        fitToScreen(w)
+        if let w {
+            bringToFront(w)
+            if target == nil { fitToScreen(w) }
+        }
         view.render()
         let prep = CACurrentMediaTime() - t0
-        animate(to: focusCamera(for: w), duration: 0.3) { [weak self] in
+        guard let destination = target ?? w.map(focusCamera) else { return }
+        animate(to: destination, duration: 0.3) { [weak self] in
             self?.finishGlide(generation, prep: prep)
         }
     }
@@ -1076,7 +1099,7 @@ final class CanvasController: NSObject {
                            pw: Double(gone.preferredSize.width), ph: Double(gone.preferredSize.height),
                            ox: Double(gone.originalFrame.minX), oy: Double(gone.originalFrame.minY),
                            ow: Double(gone.originalFrame.width), oh: Double(gone.originalFrame.height),
-                           id: id, pid: gone.pid)
+                           id: id, pid: gone.pid, frameID: gone.frameID)
     }
 
     /// An app quit. Its windows come back with new IDs when it opens again, so their spots go
@@ -1100,6 +1123,7 @@ final class CanvasController: NSObject {
         // empty, and saving would wipe the layout and the crash-recovery originals.
         guard !isPaused, hasSynced else { return }
         homeFromCanvas()
+        forgetDeletedFrames()
         // Saved positions are canvas coordinates relative to a scale-1 camera.
         let center = camera.center(in: viewSize)
         // Windows out of view (app hidden, minimised, another Space) are saved too, newest
@@ -1125,8 +1149,9 @@ final class CanvasController: NSObject {
                                    pw: Double($0.preferredSize.width), ph: Double($0.preferredSize.height),
                                    ox: Double($0.originalFrame.minX), oy: Double($0.originalFrame.minY),
                                    ow: Double($0.originalFrame.width), oh: Double($0.originalFrame.height),
-                                   id: $0.id, pid: $0.pid)
-            } + away + savedPool.prefix(60))   // windows not open right now keep their saved spots
+                                   id: $0.id, pid: $0.pid, frameID: $0.frameID)
+            } + away + savedPool.prefix(60),   // windows not open right now keep their saved spots
+            frames: frames.values.sorted { $0.name < $1.name }.map(\.saved))
         guard let data = try? JSONEncoder().encode(layout), data != lastSavedLayout else { return }
         lastSavedLayout = data
         LayoutStore.save(layout)
@@ -1174,8 +1199,13 @@ final class CanvasController: NSObject {
             w.canvasFrame.origin = sameScreen ? CGPoint(x: e.x, y: e.y) : w.home ?? w.canvasFrame.origin
             w.fitPush = .zero
             if let pw = e.pw ?? e.w, let ph = e.ph ?? e.h, pw > 0 { w.preferredSize = CGSize(width: pw, height: ph) }
+            w.frameID = e.frameID
             restored += 1
         }
+        // Its frames, where they were (moved along with their windows by the fit below).
+        for f in layout.frames ?? [] { frames[f.id] = Frame(f, defaultSize: frameSize) }
+        forgetDeletedFrames()
+        framesChanged()
         if sameScreen { fittedViewSize = viewSize }
         // The snapshot's home spots as they are: re-homing works them out from where windows
         // are now, which is what the restore is replacing.
@@ -1267,6 +1297,7 @@ final class CanvasController: NSObject {
         isPaused = true
         restoreOriginals()
         overlay.orderOut(nil)
+        frameWindows.setHidden(true)
         for w in windows { remove(w) }
         observers = [:]
         logger.info("paused")
@@ -1283,6 +1314,7 @@ final class CanvasController: NSObject {
         lastSavedLayout = nil
         overlay.level = OverlayWindow.backdropLevel
         overlay.orderFrontRegardless()
+        frameWindows.setHidden(false)
         sync()
         logger.info("resumed")
     }
@@ -1817,6 +1849,7 @@ final class CanvasController: NSObject {
             w.home = tab.home
             w.lastPlaced = tab.lastPlaced
             w.parked = tab.parked
+            w.frameID = tab.frameID
             returning = true
             logger.info("tab \(w.appName, privacy: .public)[\(w.id)] takes over from [\(tab.id)]")
         } else if let back = recentlyRemoved.removeValue(forKey: w.id) {
@@ -1826,12 +1859,14 @@ final class CanvasController: NSObject {
             w.originalFrame = back.originalFrame
             w.preferredSize = back.preferredSize
             w.home = back.home
+            w.frameID = back.frameID
         } else if mayTakeSavedSpot, let match = LayoutStore.takeMatch(bundleID: w.bundleID, title: w.title, id: w.id, pid: w.pid,
                                                                       size: f.size, open: openWindowKeys, from: &savedPool) {
             // A saved spot: at launch, or an app opened later that had windows last time.
             w.canvasFrame.origin = CGPoint(x: match.x, y: match.y)
             if let pw = match.pw, let ph = match.ph { w.preferredSize = CGSize(width: pw, height: ph) }
             if let hx = match.hx, let hy = match.hy { w.home = CGPoint(x: hx, y: hy) }
+            w.frameID = match.frameID
             if let sw = match.w, let sh = match.h, let ax = w.ax, !w.sizesItself,
                abs(sw - f.width) > 1 || abs(sh - f.height) > 1 {
                 // Quitting put the macOS size back; restore the canvas size.
@@ -1924,34 +1959,40 @@ final class CanvasController: NSObject {
         // Mid-glide: re-aim the glide in flight, hopping on from the window it's heading to.
         if gliding {
             // Mid-glide: hop on from the window it's heading to, straight away.
-            if let current = glideTarget, let next = nearest(direction, from: current.canvasFrame) {
+            if let current = glideTarget, let next = nearest(direction, from: current.canvasFrame, inside: current.frameID)?.window {
                 logger.info("navigate (chained) to \(next.appName, privacy: .public)[\(next.id)]")
                 glide(to: next)
             }
             return
         }
         guard animation == nil else { return }
+        // Zoomed out a frame is one stop; at 100% its windows are, from inside it.
         let from: CGRect
+        var inside: String?
         if isActive {
-            from = (view.hovered ?? windows.last)?.canvasFrame
+            from = (view.hovered ?? windows.last).map(unitFrame)
                 ?? CGRect(origin: camera.center(in: viewSize), size: .zero)
         } else if let app = NSWorkspace.shared.frontmostApplication, let w = focusedWindow(of: app.processIdentifier) {
             from = w.canvasFrame
+            inside = w.frameID
         } else {
             from = CGRect(origin: camera.center(in: viewSize), size: .zero)
         }
-        guard let target = nearest(direction, from: from) else { return }
+        guard let hit = nearest(direction, from: from, inside: inside) else { return }
+        let target = hit.window
         logger.info("navigate to \(target.appName, privacy: .public)[\(target.id)]")
 
         if isActive {
             view.highlight(target)
-            animate(to: Camera.centered(on: target.canvasFrame.center, scale: camera.scale, viewSize: viewSize), duration: 0.25)
+            animate(to: Camera.centered(on: hit.unit.center, scale: camera.scale, viewSize: viewSize), duration: 0.25)
             return
         }
         // With auto-centre on, every hop centres its window: a hop that only moved focus to a
         // window already on screen looked like nothing happened, and the next press skipped on.
+        // (A hop within the frame you're in keeps its view, which is already where it'd go.)
         let r = camera.toView(target.canvasFrame)
-        if !autoCentre, !target.parked, CGRect(origin: .zero, size: viewSize).insetBy(dx: -1, dy: -1).contains(r) {
+        if !autoCentre || focusCamera(for: target).origin.distance(to: camera.origin) < 1,
+           !target.parked, CGRect(origin: .zero, size: viewSize).insetBy(dx: -1, dy: -1).contains(r) {
             bringToFront(target)
             focusWindow(target)
             view.render()
@@ -1974,8 +2015,19 @@ final class CanvasController: NSObject {
     /// The nearest window in `direction`. A window sharing the row (for left / right) or column
     /// (for up / down) wins outright, nearest first; failing that, the closest window within ~35°
     /// of straight that way. Windows mostly above or below never count as left or right.
-    private func nearest(_ direction: Direction, from: CGRect) -> ManagedWindow? {
-        Self.nearest(direction, from: from, in: windows.map(\.canvasFrame)).map { windows[$0] }
+    /// Every frame counts as one window, its outline, except the one you're `inside`, whose
+    /// windows count one by one. Returns the window to go to (a frame's front one) and the stop.
+    private func nearest(_ direction: Direction, from: CGRect, inside: String?) -> (window: ManagedWindow, unit: CGRect)? {
+        var units: [(window: ManagedWindow, unit: CGRect)] = []
+        var seen = Set<String>()
+        for w in windows.reversed() {
+            if let f = frame(of: w), f.id != inside {
+                if seen.insert(f.id).inserted { units.append((w, f.rect)) }
+            } else {
+                units.append((w, w.canvasFrame))
+            }
+        }
+        return Self.nearest(direction, from: from, in: units.map(\.unit)).map { units[$0] }
     }
 
     static func nearest(_ direction: Direction, from: CGRect, in frames: [CGRect]) -> Int? {
@@ -2144,6 +2196,7 @@ final class CanvasController: NSObject {
     func noteUserMove(_ w: ManagedWindow, from before: CGPoint) {
         // Where you put it is where it goes: no push left for the next fit to take back.
         w.fitPush = .zero
+        updateFrame(of: w)
         guard isDerived else {
             if !suspendTracking { w.home = w.canvasFrame.origin }
             return
@@ -2251,9 +2304,23 @@ final class CanvasController: NSObject {
     /// doesn't rework them.
     private func fitLayoutToScreen(tidy: Bool, rederiving: Set<CGWindowID>? = nil, rehoming: Bool = true) {
         if rehoming { rehomeStrays() }
+        // Each frame's box moves as far as its windows do (an empty one, as far as Tidy Up moves it).
+        let before = frames.values.compactMap { f in frontMember(of: f).map { (f, $0, $0.canvasFrame.origin) } }
+        var emptyMoves: [String: CGVector] = [:]
+        defer {
+            for (f, w, origin) in before {
+                f.rect = f.rect.offsetBy(dx: w.canvasFrame.minX - origin.x, dy: w.canvasFrame.minY - origin.y)
+            }
+            for (id, d) in emptyMoves { frames[id]?.rect = frames[id]?.rect.offsetBy(dx: d.dx, dy: d.dy) ?? .zero }
+        }
         var home = windows.map { CGRect(origin: $0.home ?? $0.canvasFrame.origin, size: homeSize($0)) }
         if tidy {
-            Self.tidyUp(&home)
+            // A frame is tidied as one block, its box and windows: they stay as you arranged them.
+            let byFrame = Dictionary(grouping: windows.indices.filter { frame(of: windows[$0]) != nil },
+                                     by: { windows[$0].frameID ?? "" })
+            let all = frames.values.map { $0 }
+            let moves = Self.tidyUp(&home, keepingTogether: all.map { (byFrame[$0.id] ?? [], $0.rect) })
+            for (f, d) in zip(all, moves) where byFrame[f.id] == nil { emptyMoves[f.id] = d }
             for (w, h) in zip(windows, home) { w.home = CGPoint(x: h.minX.rounded(), y: h.minY.rounded()) }
         }
         for w in windows {
@@ -2486,6 +2553,25 @@ final class CanvasController: NSObject {
         separateGroups(&frames, groups: groups, reach: clusterReach)
     }
 
+    /// Tidy Up with each of `blocks` moved as one: its box, with its frames (indices into
+    /// `frames`) in it, takes part as if it were one window. Returns how far each block moved.
+    @discardableResult
+    static func tidyUp(_ frames: inout [CGRect], keepingTogether blocks: [(members: [Int], box: CGRect)]) -> [CGVector] {
+        guard !blocks.isEmpty else { tidyUp(&frames); return [] }
+        let inBlock = Set(blocks.flatMap(\.members))
+        let loose = frames.indices.filter { !inBlock.contains($0) }
+        var units = loose.map { frames[$0] } + blocks.map { b in b.members.reduce(b.box) { $0.union(frames[$1]) } }
+        let before = units
+        tidyUp(&units)
+        let moves = units.indices.map { CGVector(dx: units[$0].minX - before[$0].minX, dy: units[$0].minY - before[$0].minY) }
+        for (k, i) in loose.enumerated() { frames[i] = units[k] }
+        for (k, b) in blocks.enumerated() {
+            let d = moves[loose.count + k]
+            for i in b.members { frames[i] = frames[i].offsetBy(dx: d.dx, dy: d.dy) }
+        }
+        return Array(moves[loose.count...])
+    }
+
     private static func overlapY(_ a: CGRect, _ b: CGRect) -> Bool { min(a.maxY, b.maxY) - max(a.minY, b.minY) > 0 }
     private static func overlapX(_ a: CGRect, _ b: CGRect) -> Bool { min(a.maxX, b.maxX) - max(a.minX, b.minX) > 0 }
 
@@ -2596,9 +2682,11 @@ final class CanvasController: NSObject {
         } else if returning {
             // add() already put it back at its old spot.
         } else if windowKinds[w.id]?.standard ?? (AX.subrole(w.ax) == kAXStandardWindowSubrole as String),
-                  let spot = freeSpot(for: w, near: anchor, onScreenOnly: !autoCentre) {
+                  let placed = newSpot(for: w, near: anchor, live: live) {
+            let (spot, joining) = placed
             w.canvasFrame.origin = spot
-            logger.info("placed new window \(w.appName, privacy: .public) at \(NSStringFromPoint(spot), privacy: .public)\(anchor.map { " beside \($0.appName)[\($0.id)] at \(NSStringFromRect($0.canvasFrame))" } ?? "", privacy: .public)")
+            w.frameID = joining?.id
+            logger.info("placed new window \(w.appName, privacy: .public) at \(NSStringFromPoint(spot), privacy: .public)\(anchor.map { " beside \($0.appName)[\($0.id)] at \(NSStringFromRect($0.canvasFrame))" } ?? "", privacy: .public)\(joining.map { " in \($0.name)" } ?? "", privacy: .public)")
         } else {
             return
         }
@@ -2641,6 +2729,18 @@ final class CanvasController: NSObject {
         }
     }
 
+    /// Where a new window goes. In the frame you're in, if there's room in view, it joins the
+    /// frame, as a window opens on the desktop you're on; otherwise beside the anchor, clear of
+    /// frames.
+    private func newSpot(for w: ManagedWindow, near anchor: ManagedWindow?, live: Bool) -> (CGPoint, Frame?)? {
+        if live, let f = currentFrame(),
+           let spot = freeSpot(for: w, near: anchor.flatMap { frame(of: $0) === f ? $0 : nil }, onScreenOnly: true),
+           f.rect.contains(CGRect(origin: spot, size: w.canvasFrame.size).center) {
+            return (spot, f)
+        }
+        return freeSpot(for: w, near: anchor, onScreenOnly: !autoCentre, avoidingFrames: true).map { ($0, nil) }
+    }
+
     /// A canvas position for `w` that overlaps nothing. First anywhere along an edge of the
     /// anchor, the window it came from: right, below, left, then above, lined up with the
     /// anchor's top or left edge, then its bottom or right, then centred. Only when every edge is
@@ -2648,8 +2748,9 @@ final class CanvasController: NSObject {
     /// Upward comes last, near and far: a spot above the anchor only when there's none beside or
     /// below it within a few thousand points (going by distance alone, a gap in the row above
     /// often won).
-    private func freeSpot(for w: ManagedWindow, near anchor: ManagedWindow?, onScreenOnly: Bool) -> CGPoint? {
+    private func freeSpot(for w: ManagedWindow, near anchor: ManagedWindow?, onScreenOnly: Bool, avoidingFrames: Bool = false) -> CGPoint? {
         let others = windows.filter { $0 !== w }.map(\.canvasFrame)
+        let taken = others + (avoidingFrames ? frames.values.map(\.rect) : [])
         guard !others.isEmpty else { return nil }
         let gap = Self.gap
         let size = w.canvasFrame.size
@@ -2681,7 +2782,7 @@ final class CanvasController: NSObject {
         var best: (CGPoint, CGFloat)?
         for (origin, bias, byDistance) in candidates {
             let r = CGRect(origin: origin, size: size)
-            if others.contains(where: { $0.insetBy(dx: -gap / 2, dy: -gap / 2).intersects(r) }) { continue }
+            if taken.contains(where: { $0.insetBy(dx: -gap / 2, dy: -gap / 2).intersects(r) }) { continue }
             if onScreenOnly && !visible.contains(r) { continue }
             let score = (byDistance ? r.center.distance(to: target) : 0) + bias + (visible.contains(r) ? 0 : 1500)
                 + (r.maxY <= above + 0.5 ? 3000 : 0)
@@ -2699,7 +2800,7 @@ final class CanvasController: NSObject {
         if !isPaused {
             recentlyRemoved[w.id] = Departed(pid: w.pid, bundleID: w.bundleID, appName: w.appName, title: w.title,
                                              canvasFrame: w.canvasFrame, originalFrame: w.originalFrame,
-                                             preferredSize: w.preferredSize, home: w.home, parked: w.parked, at: Date(),
+                                             preferredSize: w.preferredSize, home: w.home, parked: w.parked, frameID: w.frameID, at: Date(),
                                              closed: closedWindows.remove(w.id) != nil)
             // Closed windows never come back; don't keep them forever.
             let weekAgo = Date().addingTimeInterval(-7 * 24 * 3600)
@@ -3223,7 +3324,8 @@ final class CanvasController: NSObject {
 
     /// Animate to 100% (onto `focus` if given), put real windows where the camera says, drop the overlay.
     /// `then`, if given, runs instead of focusing a window (going to another Space, say).
-    func exit(focus: ManagedWindow? = nil, then: (() -> Void)? = nil) {
+    /// `into`: the view to land on instead (a frame's), with `focus` focused wherever it is.
+    func exit(focus: ManagedWindow? = nil, camera into: Camera? = nil, then: (() -> Void)? = nil) {
         guard isActive else { return }
         var then = then
         // Opened over a full-screen app: the canvas's windows are on the desktop's Space.
@@ -3241,7 +3343,11 @@ final class CanvasController: NSObject {
             }
         }
         let target: Camera
-        if let focus {
+        if let into {
+            viewPlaced = false
+            if let focus { bringToFront(focus) }
+            target = into
+        } else if let focus {
             bringToFront(focus)
             fitToScreen(focus)
             if viewPlaced, abs(camera.scale - 1) < 0.001,
@@ -3416,6 +3522,7 @@ final class CanvasController: NSObject {
             restoreOriginals()
         }
         overlay.orderOut(nil)
+        frameWindows.setHidden(true)
         windows.forEach { $0.capture.stop() }
     }
 
@@ -3518,8 +3625,11 @@ final class CanvasController: NSObject {
         updateCapture(w)
     }
 
-    /// Scale 1 with the window centered (top-aligned if it's taller than the screen).
+    /// Scale 1 with the window centered (top-aligned if it's taller than the screen). A window in a
+    /// frame gets the frame's view, as long as that shows all of it (a frame bigger than the
+    /// screen can leave it out, and then it's centred like any other).
     func focusCamera(for w: ManagedWindow) -> Camera {
+        if let f = frame(of: w), shows(f.camera(on: viewSize), w) { return f.camera(on: viewSize) }
         let size = w.canvasFrame.size
         let x = (viewSize.width - size.width) / 2
         let y = size.height > viewSize.height ? 0 : (viewSize.height - size.height) / 2
@@ -3712,6 +3822,164 @@ final class CanvasController: NSObject {
         } else {
             view.render()
         }
+    }
+
+    // MARK: Frames
+
+    func frame(of w: ManagedWindow) -> Frame? { w.frameID.flatMap { frames[$0] } }
+
+    func members(of f: Frame) -> [ManagedWindow] { windows.filter { $0.frameID == f.id } }
+
+    /// The frame's front window: the one to focus going into it.
+    func frontMember(of f: Frame) -> ManagedWindow? { windows.last { $0.frameID == f.id } }
+
+    /// The size a new frame gets: the built-in display's (a MacBook's), less its menu bar, so
+    /// windows that fit in the box fit that screen at 100%. The main display's without one.
+    private var frameSize: CGSize {
+        let builtIn = NSScreen.screens.first { s in
+            (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID).map { CGDisplayIsBuiltin($0) != 0 } ?? false
+        }
+        guard let s = builtIn else { return viewSize }
+        return CGSize(width: s.frame.width, height: s.frame.height - max(0, s.frame.maxY - s.visibleFrame.maxY))
+    }
+
+    /// A window, or the frame it's in: one stop zoomed out.
+    private func unitFrame(_ w: ManagedWindow) -> CGRect {
+        frame(of: w)?.rect ?? w.canvasFrame
+    }
+
+    /// Every frame and its box (canvas space), in a steady order.
+    func frameBoxes() -> [(frame: Frame, box: CGRect)] {
+        frames.values.sorted { ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) }.map { ($0, $0.rect) }
+    }
+
+    /// The frame whose box is under `p` (view coordinates).
+    func frame(atView p: CGPoint) -> Frame? {
+        let c = camera.toCanvas(p)
+        return frameBoxes().last { $0.box.contains(c) }?.frame
+    }
+
+    /// The frame whose view is on screen at 100%, if any.
+    private func currentFrame() -> Frame? {
+        guard abs(camera.scale - 1) < 0.001 else { return nil }
+        return frames.values.first { $0.camera(on: viewSize).origin.distance(to: camera.origin) < 2 }
+    }
+
+    /// The whole of `w` is in view with camera `c`.
+    private func shows(_ c: Camera, _ w: ManagedWindow) -> Bool {
+        c.toCanvas(CGRect(origin: .zero, size: viewSize)).insetBy(dx: -1, dy: -1).contains(w.canvasFrame)
+    }
+
+    /// ⌘G, or New Frame Here: an empty frame the size of the screen (see frameSize), centred on
+    /// `centre` (canvas space; the middle of the view if nil) or, if that's taken, in the nearest
+    /// clear spot. The view moves to show it if it's out of sight.
+    func newFrame(at centre: CGPoint? = nil) {
+        guard isActive, !gliding else { return }
+        let size = frameSize
+        let c = centre ?? camera.center(in: viewSize)
+        let rect = clearSpot(for: CGRect(x: (c.x - size.width / 2).rounded(), y: (c.y - size.height / 2).rounded(),
+                                         width: size.width, height: size.height))
+        let f = Frame(name: nextFrameName(), rect: rect)
+        frames[f.id] = f
+        framesChanged()
+        logger.info("new frame \(f.name, privacy: .public) at \(NSStringFromRect(rect), privacy: .public)")
+        Toast.show("\(f.name): drag windows into it")
+        view.render()
+        if !camera.toCanvas(CGRect(origin: .zero, size: viewSize)).contains(rect) {
+            let room = rect.insetBy(dx: -rect.width / 4, dy: -rect.height / 4)
+            let scale = min(viewSize.width / room.width, viewSize.height / room.height, camera.scale)
+            cameraMovedByUser()
+            animate(to: Camera.centered(on: rect.center, scale: max(scale, Camera.minScale), viewSize: viewSize))
+        }
+        scheduleSave()
+    }
+
+    /// `rect` if it's clear of windows and frames; otherwise the clear spot nearest it, beside
+    /// one of them, or past everything.
+    private func clearSpot(for rect: CGRect) -> CGRect {
+        let room = Self.gap * 3
+        let taken = windows.map(\.canvasFrame) + frames.values.map(\.rect)
+        func clear(_ r: CGRect) -> Bool { !taken.contains { $0.insetBy(dx: -room + 0.5, dy: -room + 0.5).intersects(r) } }
+        if clear(rect) { return rect }
+        let size = rect.size
+        let all = taken.reduce(rect) { $0.union($1) }
+        var spots = [CGPoint(x: all.maxX + room, y: rect.minY), CGPoint(x: rect.minX, y: all.maxY + room),
+                     CGPoint(x: all.minX - room - size.width, y: rect.minY), CGPoint(x: rect.minX, y: all.minY - room - size.height)]
+        for o in taken {
+            spots += [CGPoint(x: o.maxX + room, y: o.minY), CGPoint(x: o.minX, y: o.maxY + room),
+                      CGPoint(x: o.minX - room - size.width, y: o.minY), CGPoint(x: o.minX, y: o.minY - room - size.height)]
+        }
+        let best = spots.map { CGRect(origin: $0, size: size) }.filter(clear)
+            .min { $0.center.distance(to: rect.center) < $1.center.distance(to: rect.center) }
+        return best.map { CGRect(x: $0.minX.rounded(), y: $0.minY.rounded(), width: size.width, height: size.height) } ?? rect
+    }
+
+    /// Into the frame at 100%: its view, with its front window focused. From the canvas, or
+    /// from anywhere (picked in a window switcher, see FrameWindows).
+    func goInto(_ f: Frame) {
+        logger.info("into \(f.name, privacy: .public)")
+        if isActive {
+            exit(focus: frontMember(of: f), camera: f.camera(on: viewSize))
+        } else if !gliding, animation == nil {
+            glide(to: frontMember(of: f), camera: f.camera(on: viewSize))
+        }
+    }
+
+    /// Frames came, went or were renamed: their windows follow (see FrameWindows).
+    private func framesChanged() {
+        frameWindows.update(frameBoxes().map(\.frame), corner: parkPoint)
+    }
+
+    /// The frame is gone; its windows stay where they are.
+    func deleteFrame(_ f: Frame) {
+        for w in members(of: f) { w.frameID = nil }
+        frames.removeValue(forKey: f.id)
+        framesChanged()
+        logger.info("deleted frame \(f.name, privacy: .public)")
+        Toast.show("Deleted \(f.name); its windows stay where they are")
+        view.render()
+        scheduleSave()
+    }
+
+    func rename(_ f: Frame, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != f.name else { return }
+        f.name = name
+        framesChanged()
+        view.render()
+        scheduleSave()
+    }
+
+    func removeFromFrame(_ w: ManagedWindow) {
+        guard let f = frame(of: w) else { return }
+        w.frameID = nil
+        Toast.show("Took \(w.appName) out of \(f.name)")
+        view.render()
+        scheduleSave()
+    }
+
+    /// A window put down (see noteUserMove) is in the frame its middle is in, if any.
+    private func updateFrame(of w: ManagedWindow) {
+        let f = frames.values.first { $0.rect.contains(w.canvasFrame.center) }
+        guard f?.id != w.frameID else { return }
+        let old = frame(of: w)
+        w.frameID = f?.id
+        logger.info("\(w.appName, privacy: .public)[\(w.id)] \(f.map { "into \($0.name)" } ?? "out of \(old?.name ?? "?")", privacy: .public)")
+        if let f {
+            Toast.show("Added \(w.appName) to \(f.name)")
+        } else if let old {
+            Toast.show("Took \(w.appName) out of \(old.name)")
+        }
+    }
+
+    private func nextFrameName() -> String {
+        let taken = Set(frames.values.map(\.name))
+        return (1...).lazy.map { "Frame \($0)" }.first { !taken.contains($0) }!
+    }
+
+    /// Windows in a frame that's been deleted are in none.
+    private func forgetDeletedFrames() {
+        for w in windows where w.frameID.map({ frames[$0] == nil }) == true { w.frameID = nil }
     }
 
     // MARK: Windows on the canvas

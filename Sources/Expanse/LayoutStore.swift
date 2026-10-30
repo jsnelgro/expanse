@@ -29,6 +29,8 @@ struct SavedLayout: Codable {
         /// say), they identify the window exactly, even among windows with the same title.
         var id: UInt32?
         var pid: Int32?
+        /// The frame it's in (see Frame).
+        var frameID: String?
     }
     var cameraX: Double
     var cameraY: Double
@@ -43,6 +45,8 @@ struct SavedLayout: Codable {
     var fittedWidth: Double?
     var fittedHeight: Double?
     var windows: [Window]
+    /// Frames, whose windows are among `windows` (see Window.frameID).
+    var frames: [Frame.Saved]?
 }
 
 enum LayoutStore {

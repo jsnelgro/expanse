@@ -53,6 +53,8 @@ final class ManagedWindow {
     var home: CGPoint?
     /// How far the last fit pushed the window to clear an overlap (see fitLayoutToScreen).
     var fitPush: CGVector = .zero
+    /// The frame it's in, if any (see Frame).
+    var frameID: String?
     /// Captured once when first seen, even if it's then on screen and not captured any more.
     var needsFirstFrame = true
     /// The last one-off picture asked for (CACurrentMediaTime), and failures in a row since.
@@ -202,9 +204,11 @@ final class WindowNode {
     /// Details that stay the same size on screen at any zoom: border, close button, label.
     /// `screenRect` is the window on screen in layer coordinates (bottom-left origin).
     /// `showsClose`: hovered, or in a selection whose window is hovered (× closes them all).
-    func style(scale s: CGFloat, hovered: Bool, selected: Bool, showsClose: Bool, visible: Bool, screenRect: CGRect) {
+    /// `showsLabel`: false for a window in a frame, whose name would cover the frame's.
+    func style(scale s: CGFloat, hovered: Bool, selected: Bool, showsClose: Bool, visible: Bool, showsLabel: Bool = true,
+               screenRect: CGRect) {
         container.isHidden = !visible
-        label.isHidden = !visible || screenRect.width < 70
+        label.isHidden = !visible || !showsLabel || screenRect.width < 70
         guard visible else { return }
         // Text layers redraw when resized, so while zooming the width only changes in 32pt steps.
         let width = max((max(screenRect.width - 4, 60) / 32).rounded(.down) * 32, 60)
