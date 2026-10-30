@@ -3630,6 +3630,11 @@ final class CanvasController: NSObject {
     /// screen can leave it out, and then it's centred like any other).
     func focusCamera(for w: ManagedWindow) -> Camera {
         if let f = frame(of: w), shows(f.camera(on: viewSize), w) { return f.camera(on: viewSize) }
+        return centredCamera(for: w)
+    }
+
+    /// Scale 1 with the window centred, frame or no frame.
+    func centredCamera(for w: ManagedWindow) -> Camera {
         let size = w.canvasFrame.size
         let x = (viewSize.width - size.width) / 2
         let y = size.height > viewSize.height ? 0 : (viewSize.height - size.height) / 2

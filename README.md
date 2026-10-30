@@ -26,6 +26,14 @@
 
 ---
 
+## Johnny's Fork
+
+What's in the fork?
+- slightly different zooming behavior. Zooms out about 50% from the current window instead of all the way out. Less jarring.
+- Frames! Create a frame while zoomed out and put windows in it. You can then return to that frame/layout instead of zooming and centering on the individual apps
+- Highly recommend using with AltTab. Zooming around is fun and all but when things get busy, typing cmd+tab and searching for a frame by name to zoom to is much faster and more reliable.
+
+
 Expanse treats your screen as a view onto a much bigger canvas. Your windows stay where you put
 them on it; you move the view instead of the windows. Rest the pointer in a corner of the screen
 to see everything at once, then click a window to fly to it, ready to use.

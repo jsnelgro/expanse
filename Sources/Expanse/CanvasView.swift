@@ -48,6 +48,8 @@ final class CanvasView: NSView {
     private var drag: Drag = .none
     var isDragging: Bool { if case .none = drag { return false } else { return true } }
     private var dragged = false
+    /// The drag started with ⌘ held to pick a window in a frame: ⌘ then doesn't turn snapping off.
+    private var pickedInFrame = false
     private var lastDragEvent: CFTimeInterval = 0
 
     override init(frame: NSRect) {
@@ -448,6 +450,8 @@ final class CanvasView: NSView {
         }
         let p = point(e)
         let shift = e.modifierFlags.contains(.shift)
+        let command = e.modifierFlags.contains(.command)
+        pickedInFrame = false
         if spaceHeld {
             drag = .pan(last: p)
             NSCursor.closedHand.set()
@@ -458,9 +462,13 @@ final class CanvasView: NSView {
                 render()
                 return
             }
-            // Windows in a frame drag like any other (dropped outside its box, one leaves it); a
-            // click goes into the frame (see focusCamera).
-            if shift {
+            // A window in a frame stands for the frame: a drag moves the frame, a click goes into it.
+            // With ⌘, it's the window itself: a drag moves it (out of the frame, dropped outside
+            // its box), a click centres it.
+            if !command, !shift, !(selected.contains(w.id) && selected.count > 1), let f = controller.frame(of: w) {
+                selected.removeAll()
+                drag = grab(f, at: p)
+            } else if shift {
                 // ⇧-click toggles the window in the selection.
                 if selected.remove(w.id) == nil { selected.insert(w.id) }
                 drag = .none
@@ -471,19 +479,24 @@ final class CanvasView: NSView {
             } else {
                 selected.removeAll()
                 controller.bringToFront(w)
+                pickedInFrame = command && controller.frame(of: w) != nil
                 drag = .window(w, startFrame: w.canvasFrame, startPoint: p)
             }
         } else if !shift, let f = controller.frame(atView: p) {
             // The frame's box, between its windows: a drag moves it with them, a click goes in.
             selected.removeAll()
-            let members = controller.members(of: f)
-            members.forEach(controller.bringToFront)
-            drag = .frame(f, startRect: f.rect, starts: members.map { ($0, $0.canvasFrame) }, startPoint: p)
+            drag = grab(f, at: p)
         } else {
             drag = .marquee(start: p, base: shift ? selected : [])
             if !shift { selected.removeAll() }
         }
         render()
+    }
+
+    private func grab(_ f: Frame, at p: CGPoint) -> Drag {
+        let members = controller.members(of: f)
+        members.forEach(controller.bringToFront)
+        return .frame(f, startRect: f.rect, starts: members.map { ($0, $0.canvasFrame) }, startPoint: p)
     }
 
     override func mouseDragged(with e: NSEvent) {
@@ -500,7 +513,7 @@ final class CanvasView: NSView {
         guard controller.isActive else { controller.enter(zoomOut: false); return }
         let p = point(e)
         let s = controller.camera.scale
-        let snapEnabled = !e.modifierFlags.contains(.command)
+        let snapEnabled = pickedInFrame || !e.modifierFlags.contains(.command)
         switch drag {
         case .none:
             break
@@ -561,7 +574,12 @@ final class CanvasView: NSView {
                 controller.scheduleSave()
             } else {
                 selected.removeAll()
-                controller.exit(focus: w)
+                // ⌘-clicked in a frame: that window, centred, not the frame's view.
+                if pickedInFrame {
+                    controller.exit(focus: w, camera: controller.centredCamera(for: w))
+                } else {
+                    controller.exit(focus: w)
+                }
             }
         case .group(let w, let starts, _):
             if dragged {
@@ -591,9 +609,28 @@ final class CanvasView: NSView {
         guard controller.isActive else { return }
         let bar = spacesBarHit(e)
         spacesBar.hovered = bar.tile
-        let overCanvas = minimapPoint(e) == nil && !bar.over
-        let w = overCanvas ? controller.window(atView: point(e)) : nil
-        let underPointer = overCanvas && w == nil ? controller.frame(atView: point(e)) : nil
+        updateHover(over: minimapPoint(e) == nil && !bar.over, at: point(e), command: e.modifierFlags.contains(.command))
+    }
+
+    /// ⌘ pressed or let go: over a frame, the hover goes between the window and its frame.
+    override func flagsChanged(with e: NSEvent) {
+        super.flagsChanged(with: e)
+        guard controller.isActive, !controller.gliding, !isDragging, let w = window else { return }
+        let p = flip(convert(w.mouseLocationOutsideOfEventStream, from: nil))
+        let bar = spacesBar.isHidden ? false : spacesGlass.frame.contains(flip(p))
+        updateHover(over: !minimapGlass.frame.contains(flip(p)) && !bar, at: p, command: e.modifierFlags.contains(.command))
+    }
+
+    /// What's under the pointer: a window, or a frame (its box, or one of its windows without ⌘).
+    private func updateHover(over overCanvas: Bool, at p: CGPoint, command: Bool) {
+        var w = overCanvas ? controller.window(atView: p) : nil
+        var underPointer: Frame?
+        if let hit = w, !command, let f = controller.frame(of: hit) {
+            w = nil
+            underPointer = f
+        } else if overCanvas, w == nil {
+            underPointer = controller.frame(atView: p)
+        }
         if w !== hovered || underPointer !== hoveredFrame {
             hovered?.node.label.string = hovered?.appName
             hovered = w
