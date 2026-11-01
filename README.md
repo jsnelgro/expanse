@@ -26,13 +26,32 @@
 
 ---
 
-## Johnny's Fork
+# Johnny's Fork
 
-What's in the fork?
-- slightly different zooming behavior. Zooms out about 50% from the current window instead of all the way out. Less jarring.
+## What's in the fork?
+- Slightly different zooming behavior. Zooms out about 50% from the current window instead of all the way out. Less jarring.
 - Frames! Create a frame while zoomed out and put windows in it. You can then return to that frame/layout instead of zooming and centering on the individual apps
-- Highly recommend using with AltTab. Zooming around is fun and all but when things get busy, typing cmd+tab and searching for a frame by name to zoom to is much faster and more reliable.
+- Dotfiles-based configuration
 
+## Planned Features
+- experiment with othographic/perspective plane so you can place less important things "further back" in space
+- flyout/summoned/quake-style windows bound to a hotkey. So for instance, pressing `hyper+j` toggles a journal app that slides out from the left.
+  - Need to think a bit more about how exactly this would work. Maybe they're special built-in "frames" that you can drop windows into to configure, and set a global hotkey for.
+  - A cool addition, though, would be "dynamic flyouts". So if you're currently in some project frame, hyper+p would summon the current project's project doc for taking notes.
+    - So this would require more functionality than just dropping a window onto a special frame. It'd need to call open on a dynamic deep-link or something, then automatically position the new window. Maybe easier and less scope if the same app was bound to the dynamic selection (like, your favorite text editor or something). Then you'd just trigger the deep link and open the window.
+- improve the "jumping" between apps. Right now, it kinda zooms quickly at low elevation. Would be nice if it eased up and back down between apps.
+- four finger swipe up to get to flying mode instead of a hotkey (currently is opt+`). I've had four finger swipe assigned to mission control for so long, it's a hard habit to break.
+- resizing windows from the zoomed out view. Not sure how hard possible this would be, but I imagine it's doable since other window managers can resize apps
+- different types of "frames". Like a tabbed frame, a scrolling frame (niri style), a binary space partitioning frame, common layout frames, etc.
+  - And make frames nestable, so you could compose more complex frames, like have a basic frame with a scrolling frame on the left and a tabbed frame on the right
+
+## Notes
+- Highly recommend using with AltTab. Zooming around is fun and all but when things get busy, typing cmd+tab and searching for a frame by name to zoom to is much faster and more reliable. I run a modified version of AltTab with additional features. You can check it out here:
+
+
+-----
+
+# Original Readme
 
 Expanse treats your screen as a view onto a much bigger canvas. Your windows stay where you put
 them on it; you move the view instead of the windows. Rest the pointer in a corner of the screen
