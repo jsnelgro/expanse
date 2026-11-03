@@ -4,6 +4,8 @@ import AppKit
 enum Toast {
     private static var window: NSWindow?
     private static var hideWork: DispatchWorkItem?
+    /// Toasts shown so far: a fade only hides the window if no toast has come since it began.
+    private static var shown = 0
 
     static func show(_ text: String) {
         guard let screen = NSScreen.screens.first else { return }
@@ -33,13 +35,20 @@ enum Toast {
         w.contentView = background
         let f = screen.visibleFrame
         w.setFrame(CGRect(x: f.midX - size.width / 2, y: f.minY + 80, width: size.width, height: size.height), display: true)
-        w.alphaValue = 1
+        // Over the last toast's fade, if one's under way (an animator change replaces it).
+        NSAnimationContext.runAnimationGroup { $0.duration = 0; w.animator().alphaValue = 1 }
         w.orderFrontRegardless()
 
+        shown += 1
+        let this = shown
         hideWork?.cancel()
         let work = DispatchWorkItem {
-            NSAnimationContext.runAnimationGroup({ $0.duration = 0.3; w.animator().alphaValue = 0 },
-                                                 completionHandler: { w.orderOut(nil) })
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.3; w.animator().alphaValue = 0 }
+            // Put away once faded, on a timer rather than the fade's completion, which waits for
+            // the display to draw (with the screen locked it never came, and the window stayed).
+            // A toast that came during the fade (Copy Logs' "Copied" after "Collecting logs…")
+            // stays: it has a fade of its own.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { if shown == this { w.orderOut(nil) } }
         }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: work)

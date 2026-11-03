@@ -14,7 +14,13 @@ enum Wallpaper {
     }
 
     /// Calls back on the main thread.
-    static func capture(screen: NSScreen, completion: @escaping (CGImage?) -> Void) {
+    static func capture(screen: NSScreen, completion done: @escaping (CGImage?) -> Void) {
+        // A request to replayd, which quitting waits for (see WindowCapture.unanswered).
+        WindowCapture.requestSent()
+        let completion = { (image: CGImage?) in
+            WindowCapture.requestAnswered()
+            done(image)
+        }
         let size = screen.frame.size
         let scale = screen.backingScaleFactor
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
@@ -35,17 +41,23 @@ enum Wallpaper {
                 DispatchQueue.main.async { completion(fromFile(screen: screen)) }
                 return
             }
-            let config = SCStreamConfiguration()
-            config.width = Int(size.width * scale)
-            config.height = Int(size.height * scale)
-            config.showsCursor = false
-            config.capturesAudio = false
+            let config = configuration(size: size, scale: scale)
             SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: display, including: desktop),
                                              configuration: config) { image, error in
                 if let error { logger.error("wallpaper capture failed: \(error.localizedDescription)") }
                 DispatchQueue.main.async { completion(image ?? fromFile(screen: screen)) }
             }
         }
+    }
+
+    /// The desktop at the screen's pixel size: no cursor, no audio.
+    private static func configuration(size: CGSize, scale: CGFloat) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = Int(size.width * scale)
+        config.height = Int(size.height * scale)
+        config.showsCursor = false
+        config.capturesAudio = false
+        return config
     }
 
     private static func fromFile(screen: NSScreen) -> CGImage? {

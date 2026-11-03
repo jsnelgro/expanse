@@ -1,27 +1,15 @@
 import AppKit
 import Carbon.HIToolbox
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = CanvasController()
     private var statusItem: NSStatusItem!
+    private var menuPanel: MenuPanel?
     private var hotKey: HotKey?
     private var centreHotKey: HotKey?
     private var centreWindowHotKey: HotKey?
     private var arrowHotKeys: [HotKey] = []
-    private let centreItem = NSMenuItem(title: "Auto-Centre Focused Window", action: #selector(toggleAutoCentre), keyEquivalent: "")
     private var signalSources: [DispatchSourceSignal] = []
-    private let accessibilityItem = NSMenuItem(title: "", action: #selector(openAccessibilitySettings), keyEquivalent: "")
-    private let cornerMenu = NSMenu()
-    private let wallpaperItem = NSMenuItem(title: "Desktop Picture Background", action: #selector(toggleWallpaper), keyEquivalent: "")
-    private let namesItem = NSMenuItem(title: "Show Window Names", action: #selector(toggleNames), keyEquivalent: "")
-    private let pauseItem = NSMenuItem(title: "Pause Expanse", action: #selector(togglePause), keyEquivalent: "")
-    private let screenRecordingItem = NSMenuItem(title: "", action: #selector(openScreenRecordingSettings), keyEquivalent: "")
-    private let installUpdateItem = NSMenuItem(title: "", action: #selector(installUpdate), keyEquivalent: "")
-    private let autoUpdateItem = NSMenuItem(title: "Check for Updates Automatically", action: #selector(toggleAutoUpdate), keyEquivalent: "")
-    private let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
-    private let detailedLoggingItem = NSMenuItem(title: "Detailed Logging", action: #selector(toggleDetailedLogging), keyEquivalent: "")
-    private let showLogItem = NSMenuItem(title: "Show Log File in Finder", action: #selector(showLogFile), keyEquivalent: "")
-    private let restoreLayoutItem = NSMenuItem(title: "Restore Layout", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Shortcuts.load()
@@ -43,7 +31,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler { NSApp.terminate(nil) }
+            source.setEventHandler {
+                Self.quitReason = sig == SIGTERM ? "SIGTERM" : "SIGINT"
+                // From the run loop, not this block on the main queue: a quit that waits (see
+                // applicationShouldTerminate) needs the main queue for its answers, and it's held
+                // for as long as this block runs, so Expanse never quit (PERSIST-05).
+                RunLoop.main.perform { NSApp.terminate(nil) }
+            }
             source.resume()
             signalSources.append(source)
         }
@@ -59,13 +53,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func registerHotKey(_ action: Shortcuts.Action, id: UInt32, handler: @escaping () -> Void) -> HotKey? {
         guard let shortcut = Shortcuts.shortcut(for: action) else { return nil }
         return HotKey(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers, id: id, handler: handler)
-    }
-
-    /// Shows the action's configured shortcut on a menu item, or none if it's turned off.
-    private func showShortcut(_ action: Shortcuts.Action, on item: NSMenuItem) {
-        let shortcut = Shortcuts.shortcut(for: action)
-        item.keyEquivalent = shortcut?.menuKey ?? ""
-        item.keyEquivalentModifierMask = shortcut?.menuModifiers ?? []
     }
 
     private func turnOn() {
@@ -109,6 +96,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         askedToCheck = false
         UserDefaults.standard.set(release.version, forKey: key)
+        switch Self.askToInstall(release) {
+        case .alertFirstButtonReturn: Updater.shared.install()
+        case .alertThirdButtonReturn: NSWorkspace.shared.open(release.page)
+        default: break
+        }
+    }
+
+    /// The question itself: Install and Relaunch, Later or What's New. Tests answer it instead.
+    private static var askToInstall: (Updater.Release) -> NSApplication.ModalResponse = { release in
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Expanse \(release.version) is ready to install"
@@ -116,30 +112,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Install and Relaunch")
         alert.addButton(withTitle: "Later")
         alert.addButton(withTitle: "What's New")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: Updater.shared.install()
-        case .alertThirdButtonReturn: NSWorkspace.shared.open(release.page)
-        default: break
-        }
+        return alert.runModal()
     }
 
-    @objc private func checkForUpdates() {
+    private func checkForUpdates() {
         askedToCheck = true
         Updater.shared.check(interactive: true)
     }
 
-    @objc private func installUpdate() { Updater.shared.install() }
-
-    @objc private func toggleAutoUpdate() { Updater.shared.automatic.toggle() }
-
-    @objc private func toggleLoginItem() { LoginItem.toggle() }
-
-    @objc private func toggleDetailedLogging() {
-        LogFile.shared.isEnabled.toggle()
-        Toast.show(LogFile.shared.isEnabled ? "Detailed logging on" : "Detailed logging off")
-    }
-
-    @objc private func copyLogs() {
+    private func copyLogs() {
         let c = controller
         BugReport.copy(settings: [
             "Canvas: \(c.windows.count) windows, \(c.isPaused ? "paused" : "running"), auto-centre \(c.autoCentre ? "on" : "off"), hot corner \(c.hotCorner.corner.title)",
@@ -147,29 +128,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ])
     }
 
-    @objc private func showLogFile() {
-        NSWorkspace.shared.activateFileViewerSelecting([LogFile.shared.url])
-    }
-
-    @objc private func reportIssue() { NSWorkspace.shared.open(BugReport.issuesURL) }
-
-    /// expanse://toggle | enter | exit | fit | restore | zoom?scale=0.5 | pan?dx=100&dy=0 | focus?app=Safari
+    /// expanse://toggle | enter | exit | fit | restore | menu | zoom?scale=0.5 | pan?dx=100&dy=0 | focus?app=Safari
     func application(_ application: NSApplication, open urls: [URL]) {
+        let browser = browserSending()
         for url in urls {
-            guard url.scheme == "expanse", let command = url.host else { continue }
-            let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems ?? []).map { ($0.name, $0.value ?? "") })
+            // Known commands only: the name goes into the log, and the question a web page's link
+            // gets (see allowFromWebPage), so it mustn't be whatever the page likes.
+            guard url.scheme == "expanse", let command = url.host, Self.commands.contains(command) else {
+                logger.info("ignored unknown URL command")
+                continue
+            }
+            // A name given twice: the first counts (uniqueKeysWithValues traps on it, and any web
+            // page can open these links).
+            let query = Dictionary((URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
             // Finite numbers only: "nan" and "inf" parse as Doubles and would poison the camera.
             func number(_ key: String) -> CGFloat? {
                 guard let d = Double(query[key] ?? ""), d.isFinite else { return nil }
                 return CGFloat(d)
             }
-            logger.info("url command \(command, privacy: .public)")
+            logger.info("url command \(command, privacy: .public)\(browser.map { " from \($0)" } ?? "", privacy: .public)")
             // Any app or web page can open expanse:// links. Commands that reach into individual
-            // windows or fake the display are for debugging only and stay off unless enabled with
-            // `defaults write com.invignation.expanse debugURLCommands -bool true`.
-            let debugCommands: Set<String> = ["place", "prefer", "dump", "screen", "update", "appearance", "logging", "copylogs"]
-            if debugCommands.contains(command), !UserDefaults.standard.bool(forKey: "debugURLCommands") {
+            // windows or fake the display are for debugging only (see debugURLCommands).
+            let debugCommands: Set<String> = ["place", "prefer", "dump", "screen", "update", "appearance", "logging", "copylogs", "snapshot",
+                                              "poweroff"]
+            if debugCommands.contains(command), !Self.debugURLCommands {
                 logger.info("ignored debug URL command \(command, privacy: .public) (debugURLCommands is off)")
                 continue
             }
@@ -177,29 +160,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 logger.info("ignored URL command \(command, privacy: .public): Expanse starts once the walkthrough is done")
                 continue
             }
+            if let browser, !["welcome", "menu"].contains(command), !allowFromWebPage(command, in: browser) {
+                logger.info("URL command \(command, privacy: .public) from a web page in \(browser, privacy: .public): not allowed")
+                continue
+            }
             if command == "nav" { runURLCommand(command, query: query, number: number); continue }
             controller.whenIdle { [weak self] in self?.runURLCommand(command, query: query, number: number) }
         }
     }
 
+    /// The web browser a link came from, by name: the app that sent the Apple event it arrived in
+    /// (or whose helper did), if it opens web pages. Nil for anything else: a script, `open`, an
+    /// app like Raycast or Shortcuts.
+    private func browserSending() -> String? {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              let pid = event.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value, pid > 0,
+              let app = CanvasController.appPID(owning: pid).flatMap(NSRunningApplication.init(processIdentifier:)),
+              let id = app.bundleIdentifier, let web = URL(string: "https://example.com"),
+              // By bundle ID: the same app can be listed at another path (Safari's is in a Cryptex).
+              NSWorkspace.shared.urlsForApplications(toOpen: web).contains(where: { Bundle(url: $0)?.bundleIdentifier == id })
+        else { return nil }
+        return app.localizedName ?? app.bundleIdentifier ?? "a web browser"
+    }
+
+    /// Scripts and apps run these links as they are. A web page can open one too, once you let
+    /// the browser, and could then rearrange your windows or switch apps while you type into one:
+    /// so you're asked, each time. (Zoomed out, the canvas would cover the question: no.)
+    private func allowFromWebPage(_ command: String, in browser: String) -> Bool {
+        guard !controller.isActive else { return false }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "A web page in \(browser) wants Expanse to run “\(command)”"
+        alert.informativeText = "Links from web pages can move your windows and switch apps. Allow it only if you clicked the link yourself, expecting this."
+        alert.addButton(withTitle: "Don't Allow")
+        alert.addButton(withTitle: "Allow")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    private static let commands: Set<String> = [
+        "toggle", "centre", "center", "enter", "exit", "fit", "restore", "tidy", "layout", "welcome", "menu", "nav", "pause",
+        "resume", "zoom", "pan", "space", "focus",
+        "place", "prefer", "dump", "screen", "update", "appearance", "logging", "copylogs", "snapshot", "poweroff",
+    ]
+
+    /// Debugging URL commands, which reach into particular windows: development builds only, with
+    /// `defaults write com.invignation.expanse debugURLCommands -bool true`. A release ignores the
+    /// setting, since any app can change it and then move other apps' windows through Expanse.
+    private static var debugURLCommands: Bool { debugCommandsAllowed(release: Updater.shared.isRelease) }
+    /// The same for a release or a development build (tests ask about both).
+    private static func debugCommandsAllowed(release: Bool) -> Bool { !release && UserDefaults.standard.bool(forKey: "debugURLCommands") }
+
     private func runURLCommand(_ command: String, query: [String: String], number: (String) -> CGFloat?) {
             // A window ID or an index: a whole number in range, or nothing. Converting anything
-            // else traps, and any web page can open these links.
+            // else traps, as does arithmetic on a huge index, and any web page can open these links.
             func windowID(_ key: String) -> CGWindowID? { number(key).flatMap { CGWindowID(exactly: $0) } }
-            func index(_ key: String) -> Int? { number(key).flatMap { Int(exactly: $0) } }
+            func index(_ key: String) -> Int? { number(key).flatMap { Int(exactly: $0) }.flatMap { (0...10_000).contains($0) ? $0 : nil } }
             switch command {
             case "toggle": controller.toggle()
             case "centre", "center": controller.centreCurrentWindow()
             case "enter": controller.enter(zoomOut: query["zoomOut"] != "0")
             case "exit": controller.exit()
-            case "fit": controller.animate(to: controller.fitCamera())
+            // Zoomed out only, as pan: at 100% the view is where your windows are, and the canvas
+            // opens wherever it's left, so moving it there moved them when you left (URL-28).
+            case "fit": if controller.isActive { controller.animate(to: controller.fitCamera()) }
             case "restore": controller.restoreAll()
             case "tidy": controller.tidy()
             case "layout":
-                // A layout snapshot, 0 the newest (see Restore Layout in the menu).
-                let all = LayoutStore.snapshots(), n = Int(number("snapshot") ?? 0)
-                if all.indices.contains(n), let layout = LayoutStore.load(all[n]) { controller.restoreLayout(layout) }
+                // A layout snapshot, 0 the newest (see Earlier layouts in the menu bar panel).
+                let all = LayoutStore.snapshots(), n = query["snapshot"] == nil ? 0 : index("snapshot")
+                if let n, all.indices.contains(n), let layout = LayoutStore.load(all[n]) { controller.restoreLayout(layout) }
             case "welcome": showWelcome()
+            case "menu": menuPanel?.show()
             case "place":
                 if let id = windowID("id"), let x = number("x"), let y = number("y") {
                     controller.setCanvasOrigin(id, CGPoint(x: x, y: y), commit: query["commit"] == "1")
@@ -210,11 +241,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     controller.setPreferredSize(id, CGSize(width: w, height: h))
                 }
             case "nav":
-                let dirs: [String: CanvasController.Direction] = ["left": .left, "right": .right, "up": .up, "down": .down]
-                if let d = dirs[query["dir"] ?? ""] {
-                    // Optional delay, so a test hop runs after the URL hand-off has settled.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(number("delay") ?? 0)) { [weak self] in
-                        self?.controller.navigate(d)
+                if let hop = Self.navHop(query, number: number) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + hop.delay) { [weak self] in
+                        self?.controller.navigate(hop.direction)
                     }
                 }
             case "update":
@@ -226,6 +255,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // What Troubleshooting › Detailed Logging and Copy Logs do, for testing them.
             case "logging": LogFile.shared.isEnabled = query["on"] == "1"
             case "copylogs": copyLogs()
+            // What Take snapshot in the menu bar panel does.
+            case "snapshot": controller.takeSnapshot()
+            // A logout or restart starting: the notification macOS posts for one (see willPowerOff).
+            case "poweroff": NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willPowerOffNotification, object: NSWorkspace.shared)
             case "appearance":
                 // Light or dark for Expanse alone, to check its look in both (anything else: the Mac's).
                 let names: [String: NSAppearance.Name] = ["light": .aqua, "dark": .darkAqua]
@@ -236,24 +269,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } else {
                     controller.simulateScreen(nil)
                 }
-            case "zoom": if let s = number("scale") { controller.zoomAnimated(to: s) }
-            case "pan": controller.pan(by: CGVector(dx: number("dx") ?? 0, dy: number("dy") ?? 0))
+            case "zoom": if controller.isActive, let s = number("scale") { controller.zoomAnimated(to: s) }
+            case "pan":
+                // Each given must be a number (not nan, inf or text): otherwise the link is ignored,
+                // not half followed.
+                let dx = query["dx"] == nil ? 0 : number("dx"), dy = query["dy"] == nil ? 0 : number("dy")
+                if let dx, let dy { controller.pan(by: CGVector(dx: dx, dy: dy)) }
             case "space":
-                // A Space by name ("Expanse" for the canvas's, "Canvas" too as it used to be called,
-                // "Desktop", or a full-screen app's), or by its place in Mission Control's order, from 1.
-                let spaces = Spaces.list().spaces
-                let name = (query["name"] ?? "").lowercased()
-                let position = (index("index") ?? 0) - 1
-                if let space = (name == "expanse" || name == "canvas" ? spaces.first { $0.id == controller.canvasDesktop } : nil)
-                    ?? spaces.first(where: { $0.name.lowercased() == name })
-                    ?? (spaces.indices.contains(position) ? spaces[position] : nil) {
+                if let space = Self.space(named: query["name"] ?? "", at: index("index"), in: Spaces.list().spaces,
+                                          canvas: controller.canvasDesktop) {
                     controller.switchToSpace(space)
                 }
             case "focus":
                 // ?app=Safari (its front window), or ?id= a window ID (from dump). Reaching into a
                 // particular window is for debugging, like place and prefer (see above).
                 let name = (query["app"] ?? "").lowercased()
-                let id = UserDefaults.standard.bool(forKey: "debugURLCommands") ? windowID("id") : nil
+                let id = Self.debugURLCommands ? windowID("id") : nil
                 if let w = controller.windows.last(where: { id != nil ? $0.id == id : $0.appName.lowercased() == name }) {
                     controller.focus(w)
                 }
@@ -261,7 +292,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
     }
 
+    /// expanse://nav: the direction, and how long to wait first (0-10s).
+    private static func navHop(_ query: [String: String], number: (String) -> CGFloat?) -> (direction: CanvasController.Direction, delay: Double)? {
+        let dirs: [String: CanvasController.Direction] = ["left": .left, "right": .right, "up": .up, "down": .down]
+        guard let d = dirs[query["dir"] ?? ""] else { return nil }
+        // Optional delay, so a test hop runs after the URL hand-off has settled.
+        return (d, Double(min(max(number("delay") ?? 0, 0), 10)))
+    }
+
+    /// expanse://space: a Space by name ("Expanse" for the canvas's, "Canvas" too as it used to be
+    /// called, "Desktop", or a full-screen app's), or by its place in Mission Control's order, from 1.
+    private static func space(named name: String, at index: Int?, in spaces: [Spaces.Space],
+                              canvas: @autoclosure () -> UInt64?) -> Spaces.Space? {
+        let name = name.lowercased()
+        let position = (index ?? 0) - 1
+        return (name == "expanse" || name == "canvas" ? spaces.first { $0.id == canvas() } : nil)
+            ?? spaces.first(where: { !name.isEmpty && $0.name.lowercased() == name })
+            ?? (spaces.indices.contains(position) ? spaces[position] : nil)
+    }
+
+    /// Why Expanse is quitting, for the log (once, in the VM, it quit with no sign of what asked).
+    static var quitReason: String?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Anything else is a quit Apple event: from logging out, or another app.
+        if Self.quitReason == nil {
+            let pid = NSAppleEventManager.shared().currentAppleEvent?.attributeDescriptor(forKeyword: keySenderPIDAttr)?.int32Value
+            let app = pid.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName } ?? "unknown"
+            Self.quitReason = "asked by \(app) (pid \(pid.map(String.init) ?? "?"))"
+        }
+        // A picture or stream start still with replayd once Expanse is gone makes macOS ask you to
+        // allow Expanse again: it can't check a request whose app has quit. So nothing new is
+        // asked for, and those under way get a moment to be answered, at most a second (CAPTURE-40).
+        guard WindowCapture.unanswered > 0 else { return .terminateNow }
+        WindowCapture.closing = true
+        let deadline = CACurrentMediaTime() + 1
+        // A timer in the common modes: AppKit waits for the reply in its modal-panel mode, and a
+        // timer fires there whatever called terminate.
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
+            guard WindowCapture.unanswered == 0 || CACurrentMediaTime() >= deadline else { return }
+            timer.invalidate()
+            self?.replyToTerminate(true)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        return .terminateLater
+    }
+
+    /// Lets a quit put off by applicationShouldTerminate go ahead. Tests stand in their own.
+    var replyToTerminate: (Bool) -> Void = { NSApp.reply(toApplicationShouldTerminate: $0) }
+
     func applicationWillTerminate(_ notification: Notification) {
+        logger.notice("quitting: \(Self.quitReason ?? "unknown", privacy: .public)")
         // Never started: nothing to put back, and the saved layout must not be overwritten.
         guard isOn else { return }
         controller.shutdown()
@@ -269,162 +350,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: "Expanse")
-
-        let menu = NSMenu()
-        menu.delegate = self
-        let open = NSMenuItem(title: "Open Expanse", action: #selector(toggleCanvas), keyEquivalent: "")
-        showShortcut(.overview, on: open)
-        menu.addItem(open)
-        menu.addItem(pauseItem)
-        menu.addItem(.separator())
-        let cornerItem = NSMenuItem(title: "Hot Corner", action: nil, keyEquivalent: "")
-        cornerItem.submenu = cornerMenu
-        for corner in HotCorner.Corner.allCases {
-            let item = NSMenuItem(title: corner.title, action: #selector(pickCorner(_:)), keyEquivalent: "")
-            item.representedObject = corner.rawValue
-            item.target = self
-            cornerMenu.addItem(item)
-        }
-        menu.addItem(cornerItem)
-        let centreWindow = NSMenuItem(title: "Centre Current Window", action: #selector(centreCurrentWindow), keyEquivalent: "")
-        showShortcut(.centreWindow, on: centreWindow)
-        menu.addItem(centreWindow)
-        showShortcut(.toggleAutoCentre, on: centreItem)
-        centreItem.target = self
-        menu.addItem(centreItem)
-        menu.addItem(wallpaperItem)
-        menu.addItem(namesItem)
-        menu.addItem(NSMenuItem(title: "Tidy Up Windows", action: #selector(tidy), keyEquivalent: ""))
-        restoreLayoutItem.submenu = NSMenu()
-        menu.addItem(restoreLayoutItem)
-        menu.addItem(NSMenuItem(title: "Restore All Windows", action: #selector(restoreAll), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Welcome & Shortcuts…", action: #selector(showWelcome), keyEquivalent: ""))
-        menu.addItem(.separator())
-        menu.addItem(installUpdateItem)
-        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
-        menu.addItem(autoUpdateItem)
-        menu.addItem(loginItem)
-        let troubleshooting = NSMenuItem(title: "Troubleshooting", action: nil, keyEquivalent: "")
-        let troubleshootingMenu = NSMenu()
-        troubleshootingMenu.addItem(detailedLoggingItem)
-        troubleshootingMenu.addItem(NSMenuItem(title: "Copy Logs for a Bug Report", action: #selector(copyLogs), keyEquivalent: ""))
-        troubleshootingMenu.addItem(showLogItem)
-        troubleshootingMenu.addItem(.separator())
-        troubleshootingMenu.addItem(NSMenuItem(title: "Report an Issue on GitHub…", action: #selector(reportIssue), keyEquivalent: ""))
-        troubleshootingMenu.items.forEach { $0.target = self }
-        troubleshooting.submenu = troubleshootingMenu
-        menu.addItem(troubleshooting)
-        menu.addItem(.separator())
-        menu.addItem(accessibilityItem)
-        menu.addItem(screenRecordingItem)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Expanse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) { item.target = self }
-        statusItem.menu = menu
+        guard let button = statusItem.button else { return }
+        button.image = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: "Expanse")
+        menuPanel = MenuPanel(button: button, state: { [unowned self] in menuState() }, perform: { [unowned self] in perform($0) })
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        let ax = AX.isTrusted(prompt: false)
-        let sr = CGPreflightScreenCaptureAccess()
-        for item in cornerMenu.items {
-            item.state = (item.representedObject as? String) == controller.hotCorner.corner.rawValue ? .on : .off
-        }
-        wallpaperItem.state = Wallpaper.enabled ? .on : .off
-        namesItem.state = CanvasView.showsNames ? .on : .off
-        centreItem.state = controller.autoCentre ? .on : .off
-        pauseItem.title = controller.isPaused ? "Resume Expanse" : "Pause Expanse (back to macOS layout)"
-        accessibilityItem.title = ax ? "Accessibility: granted" : "Grant Accessibility…"
-        let update = Updater.shared.ready?.release.version
-        installUpdateItem.title = "Install Expanse \(update ?? "")…"
-        installUpdateItem.isHidden = update == nil
-        autoUpdateItem.state = Updater.shared.automatic ? .on : .off
-        autoUpdateItem.isHidden = !Updater.shared.isRelease
-        loginItem.state = LoginItem.enabled ? .on : .off
-        loginItem.isHidden = !Updater.shared.isRelease
-        detailedLoggingItem.state = LogFile.shared.isEnabled ? .on : .off
-        showLogItem.isEnabled = FileManager.default.fileExists(atPath: LogFile.shared.url.path)
-        screenRecordingItem.title = sr ? "Screen Recording: granted" : "Grant Screen Recording…"
-        fillRestoreLayoutMenu()
+    private func menuState() -> MenuPanel.State {
+        let c = controller
+        return MenuPanel.State(isOn: isOn, isPaused: c.isPaused, isActive: c.isActive,
+                               windows: c.windows.map(\.canvasFrame), viewport: c.visibleCanvas,
+                               autoCentre: c.autoCentre, wallpaper: Wallpaper.enabled, names: CanvasView.showsNames,
+                               corner: c.hotCorner.corner,
+                               update: Updater.shared.ready?.release.version,
+                               detailedLogging: LogFile.shared.isEnabled,
+                               hasLogFile: FileManager.default.fileExists(atPath: LogFile.shared.url.path))
     }
 
-    /// The layout snapshots, newest first: "12 minutes ago (8:30 am)".
-    private func fillRestoreLayoutMenu() {
-        guard let submenu = restoreLayoutItem.submenu else { return }
-        submenu.removeAllItems()
-        let ago = RelativeDateTimeFormatter()
-        ago.unitsStyle = .full
-        let time = DateFormatter()
-        time.dateStyle = Calendar.current.isDateInToday(Date()) ? .none : .short
-        time.timeStyle = .short
-        time.doesRelativeDateFormatting = true
-        for snapshot in LayoutStore.snapshots() {
-            let when = Date().timeIntervalSince(snapshot.date) < 60 ? "Just now" : ago.localizedString(for: snapshot.date, relativeTo: Date())
-            let item = NSMenuItem(title: "\(when.prefix(1).uppercased() + when.dropFirst()) (\(time.string(from: snapshot.date)))",
-                                  action: #selector(restoreLayout(_:)), keyEquivalent: "")
-            item.representedObject = snapshot.url
-            submenu.addItem(item)
+    private func perform(_ action: MenuPanel.Action) {
+        switch action {
+        case .toggleCanvas: controller.whenIdle { [weak self] in self?.controller.toggle() }
+        case .setPaused(let paused):
+            controller.whenIdle { [weak self] in
+                guard let c = self?.controller, c.isPaused != paused else { return }
+                paused ? c.pause() : c.resume()
+            }
+        case .centreWindow: controller.whenIdle { [weak self] in self?.controller.centreCurrentWindow() }
+        case .tidy: controller.whenIdle { [weak self] in self?.controller.tidy() }
+        case .restoreAll: controller.whenIdle { [weak self] in self?.controller.restoreAll() }
+        case .restoreLayout(let url):
+            guard let snapshot = LayoutStore.snapshots().first(where: { $0.url == url }),
+                  let layout = LayoutStore.load(snapshot) else { return }
+            controller.whenIdle { [weak self] in self?.controller.restoreLayout(layout) }
+        case .takeSnapshot: controller.takeSnapshot()
+        case .autoCentre(let on): controller.autoCentre = on
+        case .wallpaper(let on):
+            Wallpaper.enabled = on
+            controller.refreshWallpaper()
+        case .names(let on):
+            CanvasView.showsNames = on
+            controller.view.render()
+        case .corner(let corner): controller.hotCorner.corner = corner
+        case .grantAccessibility: Permissions.requestAccessibility()
+        case .grantScreenRecording: Permissions.requestScreenRecording()
+        case .installUpdate: Updater.shared.install()
+        case .detailedLogging(let on):
+            LogFile.shared.isEnabled = on
+            Toast.show(on ? "Detailed logging on" : "Detailed logging off")
+        case .copyLogs: copyLogs()
+        case .showLogFile: NSWorkspace.shared.activateFileViewerSelecting([LogFile.shared.url])
+        case .reportIssue: NSWorkspace.shared.open(BugReport.issuesURL)
+        case .welcome: showWelcome()
+        case .settings:
+            // An ordinary window: zoomed out, leave the canvas first, or it would open underneath.
+            if controller.isActive, !controller.gliding { controller.exit() }
+            SettingsWindow.show { [weak self] in self?.checkForUpdates() }
+        case .quit:
+            Self.quitReason = "Quit in the menu bar panel"
+            NSApp.terminate(nil)
         }
-        if submenu.items.isEmpty {
-            let none = NSMenuItem(title: "No earlier layouts yet", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            submenu.addItem(none)
-        }
-        restoreLayoutItem.isEnabled = !controller.isPaused
     }
 
-    @objc private func restoreLayout(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL,
-              let snapshot = LayoutStore.snapshots().first(where: { $0.url == url }),
-              let layout = LayoutStore.load(snapshot) else { return }
-        controller.whenIdle { [weak self] in self?.controller.restoreLayout(layout) }
-    }
-
-    @objc private func toggleCanvas() { controller.whenIdle { [weak self] in self?.controller.toggle() } }
-    @objc private func centreCurrentWindow() { controller.whenIdle { [weak self] in self?.controller.centreCurrentWindow() } }
-    @objc private func restoreAll() { controller.whenIdle { [weak self] in self?.controller.restoreAll() } }
     /// The walkthrough is an ordinary window: zoomed out, leave the canvas first, or it would
     /// open underneath.
-    @objc private func showWelcome() {
-        if controller.isActive, !controller.gliding { controller.exit() }
-        Onboarding.show {}
-    }
-    @objc private func tidy() { controller.whenIdle { [weak self] in self?.controller.tidy() } }
-    @objc private func pickCorner(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let corner = HotCorner.Corner(rawValue: raw) else { return }
-        controller.hotCorner.corner = corner
-    }
-
-    @objc private func toggleAutoCentre() {
-        controller.autoCentre.toggle()
-        Toast.show(controller.autoCentre ? "Auto-centre on" : "Auto-centre off: windows stay put")
-    }
-
-    @objc private func toggleWallpaper() {
-        Wallpaper.enabled.toggle()
-        controller.refreshWallpaper()
-    }
-
-    @objc private func toggleNames() {
-        CanvasView.showsNames.toggle()
-        controller.view.render()
-    }
-
-    @objc private func togglePause() {
-        controller.whenIdle { [weak self] in
-            guard let c = self?.controller else { return }
-            c.isPaused ? c.resume() : c.pause()
+    private func showWelcome() {
+        // Once the canvas or a glide has handed focus back to a window, not before: shown first,
+        // the walkthrough ended up behind that window.
+        if controller.isActive, !controller.gliding {
+            controller.exit(then: { Onboarding.show {} })
+        } else {
+            controller.whenIdle { Onboarding.show {} }
         }
     }
 
-    @objc private func openAccessibilitySettings() { Permissions.requestAccessibility() }
-
-    @objc private func openScreenRecordingSettings() { Permissions.requestScreenRecording() }
-
-    /// The canvas's own commands wait until Expanse has started (see turnOn).
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        let canvasOnly: Set<Selector> = [#selector(toggleCanvas), #selector(togglePause), #selector(tidy), #selector(restoreAll),
-                                         #selector(centreCurrentWindow)]
-        return isOn || !canvasOnly.contains(menuItem.action ?? #selector(showWelcome))
+    private func toggleAutoCentre() {
+        controller.autoCentre.toggle()
+        Toast.show(controller.autoCentre ? "Auto-centre on" : "Auto-centre off: windows stay put")
     }
 }

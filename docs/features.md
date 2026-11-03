@@ -2,11 +2,17 @@
 
 What we might build next. New requests go in as they come up, and finished work moves to Done.
 
+## Not released yet
+
+Nothing yet.
+
 ## Bugs
 
-- **Windows peeking in at the screen's edges** cover the minimap and Spaces panels (29 Oct), which
-  sit on the backdrop under every window. Park a window that only shows a sliver, or float the
-  panels above windows?
+None open. The "to check" list from writing the regression tests is settled (3 Nov): four were
+real and are fixed (Not released yet, above); the README and how-it-works now name the menu bar panel's items.
+
+If a new window doesn't make it onto the canvas, the log says why (look for "not on the canvas"
+in Copy Logs for a Bug Report).
 
 ## Next up
 
@@ -16,6 +22,9 @@ What we might build next. New requests go in as they come up, and finished work 
    - Sizes snap to match: the same width as the column, the same height as the row.
    - Maybe: resize handles on the canvas while zoomed out, and a way to even up a row or
      column in one go.
+   - Released in 0.1.35 for zoomed out: edge and corner handles that snap to
+     neighbours, the gap and screen halves; a right-click size menu; evening up a selection.
+     Still to do: the same snapping when you resize a real window at 100%.
 2. **Demo videos for the README.** Recorded in a clean macOS VM, so nothing personal is filmed.
    In progress.
 3. **Minimap and Spaces polish**, left over from the UI hill climb:
@@ -27,6 +36,30 @@ What we might build next. New requests go in as they come up, and finished work 
 5. **Low-motion mode** (asked 28 Oct): animated screen moves turned off, so glides, zooms and
    centring jump straight to where they end. Probably on by default when macOS's Reduce Motion
    is on (Accessibility › Display), which Expanse doesn't follow yet.
+6. **Regression tests** (asked 29 Oct). Built: every case in [regression/](regression/README.md)
+   has a test. 541 unit tests (`scripts/test.sh`, about a minute and a half, all passing), and 237
+   end-to-end cases that drive the real app in the expanse-demo VM (`scripts/vm-integration.sh`;
+   `--all` adds the 85 that need you). A new fix adds its case and its test.
+   - End-to-end, 2 Nov: a complete run of 0.1.36 in the VM passed all 145 automatic cases, in one
+     go (`--timeout 800`). Four skip by design: three need a Developer ID release, and NAV-50's
+     Dock step needs a Dock that stays shown. macOS's screen-recording prompt still comes back now
+     and then (it needs an Allow by hand); finish a run it interrupted with `--only`.
+   - End-to-end, 3 Nov (0.1.37 and the fixes since): every automatic case passed across a complete
+     run and its reruns, apart from SPACES-25, UI-23 and UI-24, which a notification stuck on the
+     VM's screen kept from running. SIZE-11's failures were a real bug (PERSIST-43); NAV-34's was
+     the Mac sleeping mid-case. The screen-recording prompt that came back right after TRACK-11
+     (four times out of four) was Expanse quitting with a picture still with replayd (CAPTURE-40);
+     SPACES-25, UI-23 and UI-24 couldn't run because of an invisible Notification Center window
+     (UI-41). Both fixed; those three pass.
+   - The 54 guided and 31 look cases haven't been run yet.
+
+7. **Groups of windows as places** (asked 31 Oct). Released in 0.1.35:
+   windows a gap or so apart that fit the screen together are one place. A hop to one frames the
+   group, hops inside a group on screen only move focus, a click zoomed out or ⌃⌥C frames it, and
+   hovering it zoomed out outlines it (NAV-55 to NAV-60).
+8. **Build screens zoomed out** (asked 1 Nov). Released in 0.1.35: put two to
+   four windows into halves and quarters of a screen, three ways (drop zones, select and S, the
+   screen tool), and resize windows zoomed out. A built screen is a group, so it gets all of 7.
 
 ## In progress elsewhere
 
@@ -43,6 +76,15 @@ What we might build next. New requests go in as they come up, and finished work 
 - Tidy Up lines up bottom and right edges too (today: tops and lefts).
 - Demo clips that show the pointer: resting in a corner, clicking a window.
 
+## Open questions
+
+Not decided yet.
+
+- **Should Expanse keep windows from hiding under other windows** (mostly), as a tiling window
+  manager does? Asked 1 Nov. Today overlaps are allowed: new windows, Tidy Up, screens you build
+  and sizes picked zoomed out keep clear of other windows, but a window you drag (on the canvas or
+  at 100%) or resize at 100% can sit over another.
+
 ## Won't do
 
 - **Typing into windows while zoomed out.** That needs SIP turned off.
@@ -51,6 +93,53 @@ What we might build next. New requests go in as they come up, and finished work 
 
 ## Done
 
+- 0.1.39: Quitting Expanse no longer makes macOS ask you to allow it again ("bypass the
+  system private window picker"); after a notification, zooming out no longer opens the canvas
+  under an invisible window.
+- 0.1.38: Fill (the green button, Window › Fill, fn ⌃ F) grows a window right and down from
+  its top-left on the canvas, so the windows above and to its left aren't covered, and Return to
+  Previous Size puts everything back; the layout is saved even while windows keep changing, so
+  a size you've just chosen isn't lost; Restore all windows works zoomed out; the Expanse tile
+  stays on your desktop when a window is full screen; less CPU while macOS's capture service is
+  stuck; `expanse://fit` and `zoom` do nothing at 100%.
+- 0.1.37: A tab dragged out of Chrome or Brave is left alone while you hold the button, then
+  goes beside its window; scrolling and pinching on the bare desktop at 100% open the canvas
+  again, and a mouse wheel's slow notches no longer snap back; unplugging a display with the lid
+  shut keeps your layout; the minimap and Spaces panel stay put after a full-screen app's Space.
+- 0.1.36: A window grown back to its size after a smaller screen (unplugging a display, say)
+  keeps that size, instead of sometimes slipping back to the smaller one; a notice that fades
+  while the screen is locked goes away.
+- 0.1.35: Build a screen zoomed out: drop a window on another's side or corner to tile them
+  into halves and quarters of your screen, or select a few and press S, or press S with nothing
+  selected for the screen tool; drag the gap between them to move the screen. Resize windows
+  zoomed out by their edges, or right-click one for Fill, Half or Quarter screen, Same size as…
+  and more; ⌘Z undoes it, and Settings has the gap between windows (20pt, 10pt or none). Windows
+  side by side that fit the screen are one place: a hop, a click or ⌃⌥C shows the whole group.
+  Esc and ⌥` go back to the window you were in, and scrolling at 100% no longer pulls you back
+  to the window you were leaving. Fixes found by the new regression tests: steadier when the
+  window server is busy, pictures come back after macOS restarts its capture service, windows
+  macOS moves as a full-screen app comes back go back to their spots, and a window you minimise
+  right after switching to it stays minimised.
+- 0.1.34: Streaming video (Prime Video, say) no longer blinks every few seconds. Expanse kept
+  taking pictures of windows at the screen's edge, and macOS blinks protected video at every
+  one; now it takes nothing while you're at 100%.
+- 0.1.33: Security fixes. An `expanse://` link from a web page runs only once you allow it, and
+  a malformed one can't crash Expanse. Window titles in the layout file are hashed with a secret
+  key kept in your Keychain, so the file alone can't be used to check a guessed title. Layout
+  files, window sizes an app reports, and updates are all checked against sensible limits.
+- 0.1.32: For about 20s after unlocking or waking the Mac, ⌘-Tab (or the Dock) to an app whose
+  window was off screen did nothing, and an app opened then landed in the middle of the view, over
+  your windows. Now the view goes to the app you switch to, and a new window goes beside what
+  you're working on.
+- 0.1.31: The menu bar icon opens a glass panel instead of a menu (the canvas at a glance, the
+  main actions and switches, earlier layouts to restore, and a Take snapshot button); Open at Login
+  and updates moved to a new Settings window. Restarts keep the layout: windows go back where macOS
+  had them before apps quit, and windows the layout has no spot for (an app that opens at login)
+  go beside what's in view instead of on top of it. A closed window's spot goes, and an app you
+  quit and open later opens beside what you're working on; saved spots are only for a restart and
+  windows still out of view. Steam's window is taken on (a helper process draws it); a new window
+  its app is slow to list is picked up in seconds (was up to 30s); a window peeking in at the
+  screen's edge no longer covers the minimap or Spaces panels.
 - 0.1.30: Locking the Mac or sleeping its displays no longer moves windows (on 29 Oct macOS piled
   every parked window at one spot while the Mac was locked, and Expanse kept the pile as your
   layout); Restore Layout puts windows exactly where the snapshot had them.

@@ -60,6 +60,11 @@ to see everything at once, then click a window to fly to it, ready to use.
 - **See everything at once.** Every window, live, laid out the way you arranged it.
 - **Move around by direction.** <kbd>⌃</kbd> + arrow keys hop to the next window to the left,
   right, above or below.
+- **Groups of windows stay together.** Arrange a few side by side so they fit the screen, and
+  Expanse treats them as one place: hops, clicks and centring show the whole group.
+- **Build a screen in a moment.** Zoomed out, drop a window on another's side or corner to tile
+  them into halves and quarters of your screen, or select a few and press S. Resize windows
+  right there by their edges, or right-click for Fill, Half or Quarter screen.
 - **Arrange like a design tool.** Drag windows around; they snap into neat, even gaps.
 - **At home on a laptop or a big display.** On a smaller screen the layout tightens up, and plugging
   back in puts it back exactly.
@@ -91,12 +96,12 @@ A short walkthrough gets you set up in about a minute:
 |---|---|
 | Rest the pointer in a screen corner | Zoom out to every window (do it again to go back) |
 | <kbd>⌥</kbd> <kbd>`</kbd> | Pull back from the focused app; press again to return to the hovered window or frame the selected group |
-| Click a window | Glide to it and start using it |
+| Click a window | Glide to it (and the windows grouped with it) and start using it |
 | <kbd>⌃</kbd> + <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> | Hop to the next window in that direction |
 | Pinch, or scroll with two fingers | Zoom and move around the canvas |
 | Drag a window while zoomed out | Move it; it snaps into place |
 | <kbd>T</kbd> | Tidy up: each group of windows lined up and evenly spaced, where it is |
-| <kbd>Esc</kbd> | Back to 100% |
+| <kbd>Esc</kbd> | Back to 100%, to the window you were in |
 
 <details>
 <summary><strong>All shortcuts</strong></summary>
@@ -125,15 +130,16 @@ set it to `none` to turn it off, then quit and reopen Expanse.
 **Full-screen apps** keep their own Spaces, as usual. Jump to them, and back, from the
 **Spaces** panel next to the minimap at the bottom of the screen.
 
-**The menu bar icon** has the rest: which corner to use, Pause, Tidy Up, Restore Layout,
-Restore All Windows, the walkthrough again, updates, and Troubleshooting (logs for a bug report).
+**The menu bar icon** opens a panel with the rest: a live minimap that opens the canvas, Pause,
+Centre and Tidy Up, which corner to use, earlier layouts to go back to, the walkthrough again,
+Troubleshooting (logs for a bug report), and Settings (updates, opening at login).
 
 ## Questions
 
 <details>
 <summary><strong>The corner or <kbd>⌃</kbd> + arrows do nothing</strong></summary>
 
-macOS got there first. Run the walkthrough again (menu bar icon › Welcome & Shortcuts), or change
+macOS got there first. Run the walkthrough again (menu bar icon › the **?** button), or change
 the settings yourself:
 
 - **Corners:** System Settings › Desktop & Dock › Hot Corners. Set the corners you want for Expanse
@@ -146,10 +152,11 @@ the settings yourself:
 <details>
 <summary><strong>My windows ended up somewhere odd</strong></summary>
 
-Menu bar icon › **Restore Layout** puts them back the way they were earlier. Expanse keeps your
-last three layouts, saved at least 15 minutes apart, and a restore can be undone too. **Tidy Up**
-neatens things where they are. As a last resort, **Restore All Windows** brings every window
-into view, stacked in the middle of the screen.
+Menu bar icon › **Earlier layouts**: click one to put your windows back the way they were then.
+Expanse keeps your last three, taken 15 minutes apart as you work (or when you press **Take
+snapshot**), and a restore can be undone too: the layout you had becomes the newest earlier one.
+**Tidy Up** neatens things where they are. As a last resort, **Restore all windows** (beside Take
+snapshot) brings every window that's out of view back on screen, cascaded from the top middle.
 
 </details>
 
@@ -185,13 +192,20 @@ you're zoomed out or gliding between windows, and only in memory.
 <summary><strong>What does it keep, and what does it send?</strong></summary>
 
 Window pictures exist only in memory, to draw the canvas. Nothing is recorded or sent anywhere.
-The one network request is a daily update check to GitHub, which you can turn off in the menu.
-The only files Expanse writes are its layouts in `~/Library/Application Support/Expanse/`:
-window positions and sizes, app names, and a scrambled fingerprint (a hash) of each window's
-title, which recognises the window without storing the title. If you turn on **Detailed Logging**
-(menu bar icon › Troubleshooting), it also keeps a log in `~/Library/Logs/Expanse/`: what it did
-with which app's windows, never their titles. It stays on your Mac unless you copy it into a bug
-report yourself.
+The one network request is a daily update check to GitHub, which you can turn off in Settings.
+When there's a newer release, Expanse downloads its zip from GitHub, unpacks it in a temporary
+folder, and installs it only if it's signed by the same developer and notarised by Apple.
+
+Expanse keeps its layouts in `~/Library/Application Support/Expanse/`: window positions and
+sizes, app names, and a scrambled fingerprint (a hash) of each window's title, which recognises
+the window without storing the title. Expanse makes the fingerprint with a secret key kept in
+your Keychain, so the layout file on its own (a copy, a backup) can't even be used to check a
+guessed title. Its settings are where
+macOS keeps every app's (`~/Library/Preferences/com.invignation.expanse.plist`), and what it does
+goes to the macOS log, without window titles. If you turn on **Detailed Logging** (menu bar
+icon › Troubleshooting), it also keeps a log in `~/Library/Logs/Expanse/`: what it did with which
+app's windows, never their titles. It stays on your Mac unless you copy it into a bug report
+yourself.
 
 </details>
 
@@ -216,6 +230,8 @@ brew uninstall --zap --cask expanse
 ```
 
 Or drag Expanse from Applications to the Bin, and delete `~/Library/Application Support/Expanse`.
+Its window title key stays in your Keychain until you delete "Expanse window title key" in
+Keychain Access.
 
 </details>
 
@@ -237,6 +253,10 @@ open "expanse://resume"
 ```
 
 Also `enter`, `exit`, `fit`, `zoom?scale=0.5`, `pan?dx=100&dy=0` and `restore`.
+
+Any app on your Mac can open these links. They only do what you can do yourself with the canvas,
+the menu bar icon and the shortcuts. A web page can open them too, once you allow it in the
+browser's prompt, so a link that comes from a browser runs only after Expanse asks you as well.
 
 </details>
 

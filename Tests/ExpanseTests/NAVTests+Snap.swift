@@ -1,0 +1,178 @@
+import Testing
+import AppKit
+@_private(sourceFile: "CanvasController.swift") @testable import Expanse
+@_private(sourceFile: "CanvasView.swift") @testable import Expanse
+
+/// NAV-51 to NAV-54: when a scroll at 100% ends, the view moves on a little so windows aren't
+/// left cut off by the screen's edges (CanvasController.snappedCamera).
+extension NAVTests {
+
+    @Test("NAV-51 A trackpad scroll at 100% snaps when it stops")
+    func nav51() {
+        let c = TestCanvas.make(windows: Self.snapRow())
+        // Scrolled so A is cut off at the left and C at the right; then so only B is, at the right.
+        for (from, moved) in [(CGFloat(100), CGFloat(172)), (-100, -28)] {
+            c.camera = Camera(origin: CGPoint(x: from, y: 0), scale: 1)
+            let t = c.snappedCamera()
+            #expect(t == Camera(origin: CGPoint(x: from - moved, y: 0), scale: 1), "scrolled to \(from)")
+            let shown = c.windows.map { t.toView($0.canvasFrame) }.filter { !$0.intersection(Self.screen).isEmpty }
+            // None cut off, at least one whole...
+            #expect(shown.allSatisfy { Self.screen.contains($0) })
+            #expect(!shown.isEmpty)
+            // ...a window's edge 20pt in from the screen's (the next one just out of sight)...
+            #expect(shown.contains { $0.minX == 20 || $0.maxX == Self.screen.width - 20 })
+            // ...and no more than half a screen away.
+            #expect(abs(t.origin.x - from) <= Self.screen.width / 2)
+        }
+    }
+
+    @Test("NAV-51 The snap never moves more than half a screen")
+    func nav51b() {
+        // A wide window cut off at the left: making it whole would take 920pt.
+        let c = TestCanvas.make(windows: [Self.win(1, 0, 100, 1400, 400)])
+        c.camera = Camera(origin: CGPoint(x: 900, y: 0), scale: 1)
+        #expect(c.snappedCamera() == c.camera)
+    }
+
+    @Test("NAV-52 A mouse-wheel scroll snaps after a short pause (logic)")
+    func nav52() async throws {
+        let c = TestCanvas.make(windows: Self.snapRow())
+        let stuck = WindowCapture.replaydStuck
+        WindowCapture.replaydStuck = true // no pictures asked for (see onCanvas)
+        c.isActive = true
+        defer {
+            c.cancelAnimation()
+            c.isActive = false
+            WindowCapture.replaydStuck = stuck
+        }
+        // B cut off at the right, 40pt from lining up past it (see nav51).
+        c.camera = Camera(origin: CGPoint(x: -112, y: 0), scale: 1)
+        // One tick of the wheel, sideways: no phases, so only a pause can say it's over.
+        c.view.scrollWheel(with: try #require(Self.scroll(0, dx: -1, precise: false)))
+        #expect(c.camera.origin.x == -100)
+        // On the way it went, 28pt on: B whole, its right edge 20pt in.
+        let snapped = c.snappedCamera(going: c.scrollTravel, wheel: true)
+        #expect(snapped == Camera(origin: CGPoint(x: -72, y: 0), scale: 1))
+        #expect(c.animation == nil) // not straight away
+        #expect(c.view.scrollEnd != nil)
+        try await Task.sleep(for: .milliseconds(700))
+        // About a quarter of a second after the tick: snapping, or snapped.
+        #expect(c.animation?.to == snapped || c.camera == snapped)
+    }
+
+    @Test("NAV-61 The snap after a scroll carries on your way, never pulling you back")
+    func nav61() {
+        let c = TestCanvas.make(windows: Self.snapRow())
+        // Scrolled right (the contents moving left) to where A is cut off at the left and C at the
+        // right: the snap left on its own pulled the view 172pt back left, to A.
+        c.camera = Camera(origin: CGPoint(x: 100, y: 0), scale: 1)
+        #expect(c.snappedCamera() == Camera(origin: CGPoint(x: -72, y: 0), scale: 1))
+        let right = c.snappedCamera(going: CGVector(dx: -300, dy: 0))
+        #expect(right.origin.x >= 100 - 40, "pulled back to \(right.origin.x)")
+        // Going the other way, back towards A, the same spot snaps on to A.
+        #expect(c.snappedCamera(going: CGVector(dx: 300, dy: 0)) == Camera(origin: CGPoint(x: -72, y: 0), scale: 1))
+        // Scrolling up or down only: no more than a tidying 40pt sideways.
+        let down = c.snappedCamera(going: CGVector(dx: 0, dy: -200))
+        #expect(abs(down.origin.x - 100) <= 40)
+        // Through the view: a scroll to the right, then its end.
+        try? Self.onCanvas(c) {
+            c.camera = Camera(origin: CGPoint(x: 0, y: 0), scale: 1)
+            c.pan(by: CGVector(dx: -100, dy: 0), scrolling: true)
+            c.scrollEnded()
+            #expect((c.animation?.to.origin.x ?? c.camera.origin.x) >= 60)
+            #expect(c.scrollTravel == .zero)
+        }
+    }
+
+    @Test("NAV-63 A mouse wheel turned a notch at a time isn't pulled back")
+    func nav63() async throws {
+        let c = TestCanvas.make(windows: Self.snapRow())
+        // A notch to the right of where B's right edge lines up 20pt in (-72, see nav51): 12pt on,
+        // B cut off. After a trackpad scroll the snap tidies that back; after a wheel's, it stays,
+        // with nothing on its way within 40pt.
+        c.camera = Camera(origin: CGPoint(x: -60, y: 0), scale: 1)
+        let notch = CGVector(dx: -12, dy: 0)
+        #expect(c.snappedCamera(going: notch) == Camera(origin: CGPoint(x: -72, y: 0), scale: 1))
+        #expect(c.snappedCamera(going: notch, wheel: true) == c.camera)
+        // Nor does it leap on to the next window, the nearest edge its way over 500pt off.
+        c.camera = Camera(origin: CGPoint(x: 112, y: 0), scale: 1)
+        #expect(c.snappedCamera(going: notch, wheel: true) == c.camera)
+        // Through the view: notches a pause apart each move it on.
+        let stuck = WindowCapture.replaydStuck
+        WindowCapture.replaydStuck = true // no pictures asked for
+        c.isActive = true
+        defer {
+            c.cancelAnimation()
+            c.isActive = false
+            WindowCapture.replaydStuck = stuck
+        }
+        c.camera = Camera(origin: CGPoint(x: -72, y: 0), scale: 1)
+        for n in 1...3 {
+            c.view.scrollWheel(with: try #require(Self.scroll(0, dx: -1, precise: false)))
+            try await Task.sleep(for: .milliseconds(450))
+            let x = c.animation?.to.origin.x ?? c.camera.origin.x
+            #expect(x >= -72 + 12 * CGFloat(n), "notch \(n): back to \(x)")
+        }
+    }
+
+    @Test("NAV-53 A window that nearly fills the screen is centred by the snap")
+    func nav53() {
+        // Filled (32pt to spare across), its neighbour 20pt to the right; scrolled so it's cut off
+        // at the left, then at the right.
+        let filled = Self.win(1, 0, 100, 1480, 400)
+        let c = TestCanvas.make(windows: [filled, Self.win(2, 1500, 100, 600, 400)])
+        for from in [CGFloat(150), -150] {
+            c.camera = Camera(origin: CGPoint(x: from, y: 0), scale: 1)
+            let r = c.snappedCamera().toView(filled.canvasFrame)
+            #expect(Self.screen.contains(r), "scrolled to \(from)")
+            #expect(Self.near(r.midX, Self.screen.midX, 0.5), "scrolled to \(from): left edge at \(r.minX)")
+        }
+    }
+
+    @Test("NAV-53 A window the screen's exact size snaps flush with its edges")
+    func nav53b() {
+        let full = Self.win(1, 0, 100, 1512, 400)
+        let c = TestCanvas.make(windows: [full, Self.win(2, 1532, 100, 600, 400)])
+        c.camera = Camera(origin: CGPoint(x: 200, y: 0), scale: 1)
+        let r = c.snappedCamera().toView(full.canvasFrame)
+        #expect(r.minX == 0 && r.maxX == Self.screen.width)
+    }
+
+    @Test("NAV-54 No snap when nothing is cut off, or when zoomed")
+    func nav54() {
+        // Every window whole on screen or out of sight.
+        let c = TestCanvas.make(windows: [Self.win(1, 20, 100, 700, 400), Self.win(2, 740, 100, 700, 400),
+                                          Self.win(3, 1532, 100, 700, 400), Self.win(4, -900, 100, 700, 400)])
+        c.camera = Camera()
+        #expect(c.snappedCamera() == c.camera)
+    }
+
+    @Test("NAV-54 A scroll that ends zoomed out, or a ⌘-scroll zoom, doesn't snap")
+    func nav54b() throws {
+        let c = TestCanvas.make(windows: Self.snapRow())
+        try Self.onCanvas(c) {
+            c.camera = Camera(origin: CGPoint(x: 100, y: 0), scale: 0.8)
+            c.scrollEnded()
+            #expect(c.animation == nil)
+            // At 100% the same scroll does.
+            c.camera = Camera(origin: CGPoint(x: 100, y: 0), scale: 1)
+            c.scrollEnded()
+            #expect(c.animation?.to == c.snappedCamera())
+            #expect(c.animation.map { Self.near($0.duration, 0.25 * c.animationSlowdown) } == true)
+            c.cancelAnimation()
+            // A ⌘-scroll zooms, and isn't a scroll that ends in a snap.
+            c.view.scrollWheel(with: try #require(Self.scroll(-20, precise: true, command: true)))
+            #expect(c.view.scrollEnd == nil)
+            #expect(c.animation == nil)
+        }
+    }
+}
+
+// MARK: Helpers
+
+extension NAVTests {
+    /// A row of 700pt windows the standard gap (20pt) apart, wider together than the screen.
+    static func snapRow() -> [ManagedWindow] {
+        (0..<4).map { win(CGWindowID(21 + $0), CGFloat($0) * 720, 100, 700, 400) }
+    }
+}

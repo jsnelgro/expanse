@@ -4,7 +4,11 @@ import ScreenCaptureKit
 /// A real window that lives somewhere on the canvas.
 final class ManagedWindow {
     let id: CGWindowID
+    /// The process that owns the window, which Accessibility and capture go through.
     let pid: pid_t
+    /// The app it belongs to: the same process, or the app a helper process draws it for (see
+    /// CanvasController.appPID). Activating, hiding and quitting are the app's.
+    let appPID: pid_t
     let bundleID: String
     var appName: String
     var title: String
@@ -27,6 +31,22 @@ final class ManagedWindow {
     var cameBackAt: CFTimeInterval = 0
     /// When Expanse started tracking it.
     let addedAt = CACurrentMediaTime()
+    /// When a drag of yours last moved it (CACurrentMediaTime): the move that lands just after you
+    /// let go is still the drag (see CanvasController.realWindowChanged).
+    var lastDraggedAt: CFTimeInterval = 0
+    /// Its spot (and home) before Expanse last followed a move of it that you didn't drag, and when:
+    /// if it's gone a moment later, or a full-screen window comes or goes, that was macOS moving it,
+    /// not you (see CanvasController.remove and fullScreenChanging).
+    var followedFrom: (origin: CGPoint, home: CGPoint?, fitPush: CGVector, at: CFTimeInterval)?
+
+    /// Notes where it is now, as Expanse is about to follow a move of it (see followedFrom).
+    func noteFollowed(from origin: CGPoint? = nil) {
+        followedFrom = (origin ?? canvasFrame.origin, home, fitPush, CACurrentMediaTime())
+    }
+    /// Its canvas frame before the changes to the real window now under way (each within 0.5s of
+    /// the last), and when the last came: macOS's Fill animates in steps, each followed, and a
+    /// Fill keeps the top-left it started from (see CanvasController.realWindowChanged).
+    var changing: (from: CGRect, at: CFTimeInterval)?
     /// When its app last changed its size (see sizesItself, CanvasController.resizedItself).
     var resizedItselfAt: CFTimeInterval = 0
     /// The size the user chose. On a small screen the real window may be shrunk to fit.
@@ -60,6 +80,9 @@ final class ManagedWindow {
     /// The last one-off picture asked for (CACurrentMediaTime), and failures in a row since.
     var lastSnapshotAt: CFTimeInterval = 0
     var snapshotFailures = 0
+    /// At 100%: its stand-in at the edge of the screen wants one fresh picture (see
+    /// CanvasController.updateStreaming).
+    var pictureStale = false
     /// Width in pixels of the picture showing now (captured smaller when zoomed out).
     var pictureWidth = 0
 
@@ -69,9 +92,13 @@ final class ManagedWindow {
 
     init(scWindow: SCWindow, canvasFrame: CGRect) {
         self.id = scWindow.windowID
-        self.pid = scWindow.owningApplication?.processID ?? 0
-        self.bundleID = scWindow.owningApplication?.bundleIdentifier ?? ""
-        self.appName = scWindow.owningApplication?.applicationName ?? "Window"
+        let pid = scWindow.owningApplication?.processID ?? 0
+        self.pid = pid
+        appPID = CanvasController.appPID(owning: pid) ?? pid
+        // A helper's window goes by its app's name (Steam, not Steam Helper).
+        let app = appPID == pid ? nil : NSRunningApplication(processIdentifier: appPID)
+        self.bundleID = app?.bundleIdentifier ?? scWindow.owningApplication?.bundleIdentifier ?? ""
+        self.appName = app?.localizedName ?? scWindow.owningApplication?.applicationName ?? "Window"
         self.title = scWindow.title ?? ""
         self.scWindow = scWindow
         self.canvasFrame = canvasFrame
@@ -95,6 +122,8 @@ final class ManagedWindow {
     /// Real window moves made so far (main thread), so a window scan can tell its frames are out
     /// of date.
     static var moves = 0
+    /// The same for resizes: a scan from before one has the old size, zoomed out too.
+    static var resizes = 0
 
     /// Moves the real window to `point` (global CG coords) and records where it landed.
     func place(at point: CGPoint) {

@@ -40,10 +40,42 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     static var replaydStuck = false {
         didSet { if oldValue, !replaydStuck, canAsk { askAgain?() } }
     }
-    static var canAsk: Bool { overdue < 3 && !replaydStuck }
+    static var canAsk: Bool { overdue < 3 && !replaydStuck && !closing }
+    /// Expanse is quitting: nothing new is asked for (see AppDelegate.applicationShouldTerminate).
+    static var closing = false
+    /// Stream starts and pictures sent to replayd and not answered yet. Main thread only. A request
+    /// replayd gets to after Expanse has quit is one it can't check (it can't find the app), and
+    /// macOS then asks you to allow Expanse again ("bypass the system private window picker"), so
+    /// quitting waits a moment for these (CAPTURE-40).
+    private(set) static var unanswered = 0
+    /// One more request on its way to replayd (main thread).
+    static func requestSent() { unanswered += 1 }
+    /// One answered, or failed before it reached replayd (main thread).
+    static func requestAnswered() { unanswered = max(0, unanswered - 1) }
     /// Starts what was held back, once replayd answers again.
     static var askAgain: (() -> Void)?
+    /// How long an overdue request counts against new ones: as long as replayd had gone without
+    /// answering anything when it went overdue, at least overdueExpiry and at most
+    /// overdueExpiryLimit. replayd forgets what it held when it's restarted, so those answers never
+    /// come, and three of them stopped every capture for good (CAPTURE-27). One that's stuck still
+    /// gets three requests at a time, at ever longer intervals: a hundred or so overnight, where
+    /// asking every few seconds piled up thousands.
+    static var expiry: TimeInterval {
+        min(max(overdueExpiry, CACurrentMediaTime() - lastAnswer), overdueExpiryLimit)
+    }
+    static var overdueExpiry: TimeInterval = 10
+    static var overdueExpiryLimit: TimeInterval = 600
+    /// When replayd last answered a stream start or a picture.
+    static var lastAnswer = CACurrentMediaTime()
 
+    /// A request was answered (or failed before it reached replayd).
+    private static func noteAnswer(late: inout Bool) {
+        lastAnswer = CACurrentMediaTime()
+        requestAnswered()
+        if late { late = false; overdueAnswered() }
+    }
+
+    /// A late request was answered, or stopped counting (see expiry).
     private static func overdueAnswered() {
         overdue -= 1
         if canAsk { askAgain?() }
@@ -70,12 +102,18 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // Held back while replayd isn't answering: still wanted, so askAgain starts it.
         guard Self.canAsk else { return }
         starting = true
+        Self.requestSent()
         startToken += 1
         let token = startToken
         // Main thread only, like the counter.
         var answered = false, late = false
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.replaydTimeout) { [weak self] in
-            if !answered { late = true; Self.overdue += 1 }
+            if !answered {
+                late = true; Self.overdue += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.expiry) {
+                    if late { late = false; Self.requestAnswered(); Self.overdueAnswered() }
+                }
+            }
             guard let self, self.starting, self.startToken == token else { return }
             logger.info("stream start for \(window.windowID) timed out")
             self.starting = false
@@ -99,7 +137,7 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 logger.error("addStreamOutput failed: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     answered = true
-                    if late { Self.overdueAnswered() }
+                    Self.noteAnswer(late: &late)
                     self.starting = false
                     if self.isStopped { self.notifyStopped() }
                 }
@@ -108,7 +146,7 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             stream.startCapture { [weak self] error in
                 DispatchQueue.main.async {
                     answered = true
-                    if late { Self.overdueAnswered() }
+                    Self.noteAnswer(late: &late)
                     guard let self else { return }
                     // Given up on meanwhile: not this capture's stream any more.
                     guard self.startToken == token else {
@@ -147,24 +185,36 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             finished = true
             completion(ok)
         }
+        Self.requestSent()
         queue.async { [weak self] in
-            let filter = SCContentFilter(desktopIndependentWindow: window)
-            SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config) { sample, error in
+            Self.screenshot(window, config) { sample, error in
                 let ok = sample?.imageBuffer != nil
                 if let self, let sample, ok { FramePump.shared.post(sample, for: self, snapshot: true) }
                 if let error { logger.info("snapshot of \(window.windowID) failed: \(error.localizedDescription, privacy: .public)") }
                 DispatchQueue.main.async {
                     answered = true
-                    if late { Self.overdueAnswered() }
+                    Self.noteAnswer(late: &late)
                     finish(ok)
                 }
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.replaydTimeout) {
-            if !answered { late = true; Self.overdue += 1 }
+            if !answered {
+                late = true; Self.overdue += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.expiry) {
+                    if late { late = false; Self.requestAnswered(); Self.overdueAnswered() }
+                }
+            }
             if !finished { logger.info("snapshot of \(window.windowID) timed out") }
             finish(false)
         }
+    }
+
+    /// ScreenCaptureKit's one-off picture call (see snapshot). Tests put a stand-in here, so
+    /// nothing is captured.
+    static var screenshot: (SCWindow, SCStreamConfiguration, @escaping (CMSampleBuffer?, Error?) -> Void) -> Void = { window, config, done in
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        SCScreenshotManager.captureSampleBuffer(contentFilter: filter, configuration: config, completionHandler: done)
     }
 
     /// Capture at a new size or rate. ScreenCaptureKit can reconfigure a running stream, but a
@@ -224,8 +274,11 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private static func configuration(pixelSize: CGSize, fps: Int) -> SCStreamConfiguration {
         let c = SCStreamConfiguration()
-        c.width = max(2, Int(pixelSize.width.rounded()))
-        c.height = max(2, Int(pixelSize.height.rounded()))
+        // Within what a picture can be (the largest texture there is): a window's size comes from
+        // its app, and converting NaN, infinity or a huge number to whole pixels traps.
+        func pixels(_ v: CGFloat) -> Int { v.isFinite ? Int(min(max(v.rounded(), 2), 16384)) : 2 }
+        c.width = pixels(pixelSize.width)
+        c.height = pixels(pixelSize.height)
         c.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
         c.pixelFormat = kCVPixelFormatType_32BGRA
         // Each buffer in the pool is a full picture (tens of MB for a big window at full size): a

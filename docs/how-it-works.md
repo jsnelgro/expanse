@@ -4,7 +4,7 @@ Expanse runs on a stock Mac with System Integrity Protection on. Everything belo
 
 - **Camera.** Every window has a frame in canvas space, and a camera (an origin and a scale) maps the
   canvas to the screen. The layout is saved to `~/Library/Application Support/Expanse/`, along
-  with a few snapshots taken 15 or more minutes apart for Restore Layout.
+  with a few snapshots taken 15 or more minutes apart for Earlier layouts in the menu bar panel.
 - **At 100%, windows are real.** They sit exactly where the camera says, moved with the
   Accessibility API. Windows outside the view are *parked* in the bottom-right corner of the
   screen, with one pixel showing (the trick [AeroSpace](https://github.com/nikitabobko/AeroSpace)
@@ -15,19 +15,34 @@ Expanse runs on a stock Mac with System Integrity Protection on. Everything belo
   for covered and parked windows, so the whole canvas stays live. Panning and zooming only touch
   one Core Animation transform, so nothing reflows and it stays at 120 fps. The minimap and
   Spaces panels are system Liquid Glass (macOS 26 and later).
+- **Groups.** Windows a gap or so apart (40pt, directly or through a neighbour) whose outline
+  fits the screen at 100% count as one place, measured from the layout whenever it's needed.
+  Going to any of them (a hop, a click zoomed out, ⌃⌥C) frames the whole group, and hops between
+  them while it's on screen only move focus.
+- **Screens you build** are windows sized and placed into the halves and quarters of a
+  screen-sized frame (`Screens.swift`), the gap between them and round the edge, so they are a
+  group with nothing new saved. Zoomed out, Expanse sizes the real windows straight away (the
+  canvas hides them) and takes the size each app accepts as its chosen size; windows in the way
+  move clear, far enough not to join the group. Which slots a group fills is worked out from
+  where its windows are, for dropping more in. Each screen or size change keeps the windows'
+  frames and chosen sizes before it, for ⌘Z.
 - **Gliding** between windows at 100% uses the same approach for a moment. The backdrop rises,
   with pictures exactly over the real windows, and the camera animates. The real windows then
   move once, hidden, on a background thread.
 - **Capture only what can be seen.** Every stream costs the window server work, and macOS marks
   every captured window with a purple badge. So Expanse streams only the windows in view while
   zoomed out or gliding, when the backdrop covers them anyway. Those streams stop before the
-  backdrop drops. At 100% nothing streams: the slivers of parked windows showing at the screen's
-  edges are refreshed with snapshots. Pictures are captured at the size they're drawn.
+  backdrop drops. At 100% nothing streams: each sliver of a parked window showing at the screen's
+  edge gets one snapshot as it comes into view, and isn't refreshed after that. Every capture
+  makes video that macOS protects (streaming services' DRM) blink on screen, wherever it's
+  playing, so at rest Expanse captures nothing at all. Pictures are captured at the size they're
+  drawn.
 - **Sixteen streams at most.** The system service behind every screen capture on the Mac runs
   out of file descriptors at a few dozen streams, other apps' included. After that, new streams
   silently get no frames. So the sixteen most visible windows stream, and every other window in
   view is refreshed with one-off snapshots in turn. New windows get their first picture the same
-  way.
+  way. `defaults write com.invignation.expanse streamBudget -int 8` lowers the limit (a VM's
+  service gives out sooner); nothing raises it.
 - **Full-screen apps** get a Space of their own from macOS, so they aren't on the canvas. Expanse
   leaves their windows alone, and lists the Spaces (as the window server reports them, the list
   Mission Control shows) beside the minimap.
@@ -71,8 +86,10 @@ Expanse still reports itself trusted but sees no windows. To fix it, turn Expans
 again in System Settings › Privacy & Security › Accessibility.
 
 The log shows every window Expanse moves, resizes or follows, glide timings, and anything slow.
-Debugging URL commands are off by default; turn them on with
-`defaults write com.invignation.expanse debugURLCommands -bool true`. Then
+Development builds have debugging URL commands, off by default; turn them on with
+`defaults write com.invignation.expanse debugURLCommands -bool true`. (A release ignores that
+setting: any app could change it, then move other apps' windows through Expanse.) Then
 `open "expanse://dump"` writes the full layout to the log, and `screen?w=1512&h=982` pretends the
-display is that size. The others are `place`, `prefer`, `focus?id=` with a window ID,
-`appearance?mode=light|dark`, and `update?install=1` to update without asking.
+display is that size. The others are `place`, `prefer`, `focus?id=` with a window ID, and
+`appearance?mode=light|dark`. (`update?install=1` is still accepted but does nothing: development
+builds don't update; see URL-19.)
