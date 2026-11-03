@@ -46,6 +46,8 @@ final class CanvasView: NSView {
         var hover: Slot?
         /// Undo steps it has taken, so Esc can put everything back.
         var steps = 0
+        /// The named screen it's arranging (Arrange windows in…), which goes where it's moved.
+        var frame: Frame?
     }
     private var tool: Tool?
     /// The tool's quarters, outlined.
@@ -65,6 +67,8 @@ final class CanvasView: NSView {
     private let frameHover = CAShapeLayer()
     private let frameNames = CALayer()
     private var frameNameLayers: [String: CATextLayer] = [:]
+    /// Named screens moving with a group drag, from where each started (see framesCarried).
+    private var carriedFrames: [(Frame, CGRect)]?
 
     private enum Drag {
         case none
@@ -325,7 +329,9 @@ final class CanvasView: NSView {
         } else {
             selectionBox.path = nil
         }
-        if c.isActive, picked.count < 2, drop == nil, tool == nil, let group = hovered.flatMap(c.screenGroup) ?? ringGroup {
+        // A frame's window hovered stands for the frame (see updateHover): its group's ring shows.
+        let framed = hoveredFrame.flatMap(c.frontMember).flatMap(c.screenGroup)
+        if c.isActive, picked.count < 2, drop == nil, tool == nil, let group = hovered.flatMap(c.screenGroup) ?? ringGroup ?? framed {
             groupOutline.path = CGPath(roundedRect: flip(ringBox(group)), cornerWidth: 10, cornerHeight: 10, transform: nil)
         } else {
             groupOutline.path = nil
@@ -356,8 +362,10 @@ final class CanvasView: NSView {
         CATransaction.commit()
     }
 
-    /// The frames' boxes and names, zoomed out. At 100% (gliding included) you're in a frame or
-    /// among windows, and the desktop shows as it is.
+    /// The frames' names, zoomed out, and the boxes of empty ones. A frame with windows is a named
+    /// group: its name sits on the ring round them, which shows on hover as any group's does (see
+    /// render). At 100% (gliding included) you're in a frame or among windows, and the desktop
+    /// shows as it is.
     private func renderFrames() {
         guard let c = controller else { return }
         let boxes = c.isActive && !c.gliding ? c.frameBoxes() : []
@@ -367,10 +375,16 @@ final class CanvasView: NSView {
         var litPath: CGPath?
         var shown = Set<String>()
         for (f, box) in boxes {
-            let r = flip(c.camera.toView(box))
-            let radius = max(18 * s, 3)
-            path.addRoundedRect(in: r, cornerWidth: radius, cornerHeight: radius)
-            if f === lit { litPath = CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil) }
+            let r = flip(c.labelBox(of: f))
+            let members = c.members(of: f)
+            if members.isEmpty {
+                let radius = max(18 * s, 3)
+                path.addRoundedRect(in: r, cornerWidth: radius, cornerHeight: radius)
+                if f === lit { litPath = CGPath(roundedRect: flip(c.camera.toView(box)), cornerWidth: radius, cornerHeight: radius, transform: nil) }
+            } else if f === lit, c.screenGroup(of: members[0]) == nil {
+                // Windows too far apart to be a group: a ring of the frame's own, as a group's.
+                litPath = CGPath(roundedRect: r, cornerWidth: 10, cornerHeight: 10, transform: nil)
+            }
             let name = frameNameLayers[f.id] ?? {
                 let l = CATextLayer()
                 l.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
@@ -691,10 +705,15 @@ final class CanvasView: NSView {
                 drag = .window(w, startFrame: w.canvasFrame, startPoint: p)
             }
         } else if !shift, let group = screenRing(at: p) {
-            // A screen's ring: the whole screen moves (a click without moving goes to it).
+            // A screen's ring: the whole screen moves (a click without moving goes to it). A named
+            // one moves with its frame.
             selected.removeAll()
-            group.forEach(controller.bringToFront)
-            drag = .group(clicked: group[0], starts: group.map { ($0, $0.canvasFrame) }, startPoint: p)
+            if let f = controller.sharedFrame(of: group) {
+                drag = grab(f, at: p)
+            } else {
+                group.forEach(controller.bringToFront)
+                drag = .group(clicked: group[0], starts: group.map { ($0, $0.canvasFrame) }, startPoint: p)
+            }
             NSCursor.closedHand.set()
         } else if !shift, let f = controller.frame(atView: p) {
             // The frame's box, between its windows: a drag moves it with them, a click goes in.
@@ -757,6 +776,10 @@ final class CanvasView: NSView {
             let (snapped, lines) = snapEnabled ? controller.snap(proposed, excluding: Set(starts.map(\.0.id))) : (proposed, [])
             let dx = d.dx + snapped.minX - proposed.minX, dy = d.dy + snapped.minY - proposed.minY
             for (w, start) in starts { w.canvasFrame = start.offsetBy(dx: dx, dy: dy) }
+            // Named screens whose windows are all being moved go with them, not left behind.
+            let carried = carriedFrames ?? controller.framesCarried(by: starts.map(\.0)).map { ($0, $0.rect) }
+            carriedFrames = carried
+            for (f, start) in carried { f.rect = start.offsetBy(dx: dx, dy: dy) }
             showGuides(lines)
             render()
         case .frame(let f, let startRect, let starts, let startPoint):
@@ -802,6 +825,7 @@ final class CanvasView: NSView {
             }
         }
         lastDragEvent = 0
+        carriedFrames = nil
         showGuides([])
         marquee.path = nil
         let dropped = drop
@@ -953,12 +977,12 @@ final class CanvasView: NSView {
                 controller.exit(focus: hovered ?? controller.windows.last)
             }
         case .newFrame:
-            controller.newFrame(at: pointerOnCanvas())
+            if tool == nil { nameScreenUnderPointer() }
         case .deleteFrame:
             if let f = hoveredFrame ?? hovered.flatMap(controller.frame(of:)) {
                 controller.deleteFrame(f)
             } else {
-                Toast.show("Point at a frame to delete it")
+                Toast.show("Point at a named screen to delete it")
             }
         case .fit:
             controller.animate(to: controller.fitCamera())
@@ -1003,6 +1027,25 @@ final class CanvasView: NSView {
         }
     }
 
+    /// ⌘G: the selection, or the screen group or window under the pointer, becomes a named
+    /// screen (a named one is renamed); over empty canvas, a new screen starts there (the screen
+    /// tool), named when you're done.
+    private func nameScreenUnderPointer() {
+        if let f = hoveredFrame {
+            promptRename(f)
+            return
+        }
+        let picked = controller.windows.filter { selected.contains($0.id) }
+        if let ws = picked.isEmpty ? (hovered.map { controller.screenGroup(of: $0) ?? [$0] } ?? ringGroup) : picked {
+            if let f = controller.nameScreen(ws) {
+                selected.removeAll()
+                promptRename(f)
+            }
+            return
+        }
+        startTool(centredOn: pointerOnCanvas() ?? controller.camera.toCanvas(CGPoint(x: bounds.midX, y: bounds.midY)))
+    }
+
     /// The canvas point under the pointer, if it's over the canvas.
     private func pointerOnCanvas() -> CGPoint? {
         guard let w = window else { return nil }
@@ -1010,49 +1053,37 @@ final class CanvasView: NSView {
         return bounds.contains(flip(p)) ? controller.camera.toCanvas(p) : nil
     }
 
-    // MARK: Context menu
+    // MARK: Frames in the right-click menu
 
-    override func rightMouseDown(with e: NSEvent) {
-        guard controller.isActive, !controller.gliding else { super.rightMouseDown(with: e); return }
-        let p = point(e)
-        let menu = NSMenu()
-        func add(_ title: String, _ action: Selector, _ object: Any) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
-            item.representedObject = object
-            menu.addItem(item)
+    /// The named screen's items, or naming one, at the top of the right-click menu (see menu(for:)):
+    /// for the window clicked, else what's at `p` (an empty frame's box, a frame's name, a ring).
+    private func addFrameItems(to menu: NSMenu, window w: ManagedWindow?, at p: CGPoint) {
+        let c = controller!
+        var items: [NSMenuItem] = []
+        if let f = w.flatMap(c.frame(of:)) ?? c.frame(atView: p) {
+            items.append(MenuAction("Go to \(f.name)") { c.goInto(f) })
+            items.append(MenuAction("Rename \(f.name)…") { [weak self] in self?.promptRename(f) })
+            items.append(MenuAction("Arrange windows in \(f.name)…") { [weak self] in self?.startTool(on: f) })
+            if let w, w.frameID == f.id { items.append(MenuAction("Take \(w.appName) out of \(f.name)") { c.removeFromFrame(w) }) }
+            items.append(MenuAction("Delete \(f.name)") { c.deleteFrame(f) })
+        } else if let ws = w.map({ w in
+            // The selection, if this window's in it; else its group, or it on its own.
+            let picked = c.windows.filter { selected.contains($0.id) }
+            return picked.contains { $0 === w } ? picked : c.screenGroup(of: w) ?? [w]
+        }) ?? screenRing(at: p) {
+            items.append(MenuAction("Name this screen…") { [weak self] in
+                if let f = c.nameScreen(ws) {
+                    self?.selected.removeAll()
+                    self?.promptRename(f)
+                }
+            })
         }
-        let w = controller.window(atView: p)
-        if let f = w.flatMap(controller.frame(of:)) ?? controller.frame(atView: p) {
-            add("Go to \(f.name)", #selector(goToFrame(_:)), f)
-            add("Rename \(f.name)…", #selector(renameFrame(_:)), f)
-            if let w, w.frameID == f.id { add("Take \(w.appName) out of \(f.name)", #selector(takeOutOfFrame(_:)), w) }
-            menu.addItem(.separator())
-            add("Delete \(f.name)", #selector(deleteFrame(_:)), f)
-        } else {
-            add("New Frame Here", #selector(newFrameHere(_:)), NSValue(point: controller.camera.toCanvas(p)))
-        }
-        NSMenu.popUpContextMenu(menu, with: e, for: self)
+        guard !items.isEmpty else { return }
+        items.append(.separator())
+        for (i, item) in items.enumerated() { menu.insertItem(item, at: i) }
     }
 
-    @objc private func goToFrame(_ item: NSMenuItem) {
-        if let f = item.representedObject as? Frame { controller.goInto(f) }
-    }
-
-    @objc private func deleteFrame(_ item: NSMenuItem) {
-        if let f = item.representedObject as? Frame { controller.deleteFrame(f) }
-    }
-
-    @objc private func takeOutOfFrame(_ item: NSMenuItem) {
-        if let w = item.representedObject as? ManagedWindow { controller.removeFromFrame(w) }
-    }
-
-    @objc private func newFrameHere(_ item: NSMenuItem) {
-        if let p = (item.representedObject as? NSValue)?.pointValue { controller.newFrame(at: p) }
-    }
-
-    @objc private func renameFrame(_ item: NSMenuItem) {
-        guard let f = item.representedObject as? Frame else { return }
+    private func promptRename(_ f: Frame) {
         let alert = NSAlert()
         alert.messageText = "Rename \(f.name)"
         let field = NSTextField(string: f.name)
@@ -1083,13 +1114,16 @@ final class CanvasView: NSView {
     /// "Same size as…": the window that takes the size of the next one you click.
     private var sizing: ManagedWindow?
 
-    /// Zoomed out: a window's sizes, or on empty canvas, what you can do with it all.
+    /// Zoomed out: a window's sizes, or on empty canvas, what you can do with it all. Frames' items
+    /// go first (see addFrameItems).
     override func menu(for e: NSEvent) -> NSMenu? {
         guard controller.isActive, !controller.gliding, tool == nil else { return nil }
         sizing = nil
         let p = point(e)
-        guard let w = controller.window(atView: p) else { return canvasMenu(at: controller.camera.toCanvas(p)) }
-        return windowMenu(w)
+        let w = controller.window(atView: p)
+        let menu = w.map(windowMenu) ?? canvasMenu(at: controller.camera.toCanvas(p))
+        addFrameItems(to: menu, window: w, at: p)
+        return menu
     }
 
     private func windowMenu(_ w: ManagedWindow) -> NSMenu {
@@ -1249,12 +1283,31 @@ final class CanvasView: NSView {
     }
 
     /// Return or a click on empty canvas: done. Esc: everything it did undone.
+    /// Done, the screen is a named one (see CanvasController.nameScreen(at:)), its name asked for
+    /// if it's new.
     private func finishTool(cancel: Bool = false) {
         guard let t = tool else { return }
         tool = nil
         if cancel { for _ in 0..<t.steps { controller.undo() } }
         selected.removeAll()
         logger.info("screen tool: \(cancel ? "cancelled" : "done", privacy: .public) (\(t.steps) placed)")
+        render()
+        guard !cancel else { return }
+        if let f = t.frame {
+            f.rect = t.screen
+            controller.scheduleSave()
+        } else {
+            let named = controller.nameScreen(at: t.screen)
+            if named.new { promptRename(named.frame) }
+        }
+        render()
+    }
+
+    /// Arrange windows in…: the screen tool on a named screen, the size of the screen now.
+    private func startTool(on f: Frame) {
+        tool = Tool(screen: controller.screenRect(at: f.rect.origin), frame: f)
+        selected.removeAll()
+        logger.info("screen tool: started on \(f.name, privacy: .public)")
         render()
     }
 

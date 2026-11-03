@@ -3287,6 +3287,10 @@ final class CanvasController: NSObject {
         guard !placements.isEmpty else { return }
         let screen = screenRect(at: origin)
         recordUndo("screen of \(placements.count)")
+        // A named screen whose windows are all in this one goes with them (see Frame), so they
+        // stay in it as they're put down.
+        let carried = framesCarried(by: placements.map(\.0) + members)
+        if carried.count == 1 { carried[0].rect = screen }
         for (w, slot) in placements {
             let f = Screens.frame(of: slot, in: screen, gap: Self.gap)
             let before = w.canvasFrame.origin
@@ -4809,13 +4813,75 @@ final class CanvasController: NSObject {
         frames.values.sorted { ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) }.map { ($0, $0.rect) }
     }
 
-    /// The frame whose box, or the strip above it where its name is, is under `p` (view
-    /// coordinates). The name strip is a handle for moving a frame that's full of windows.
+    /// What a frame's name sits on, in the view: an empty frame's box, or round its windows as a
+    /// group's ring is (see CanvasView.ringBox), since a frame with windows is a named group.
+    func labelBox(of f: Frame) -> CGRect {
+        let members = members(of: f)
+        guard !members.isEmpty else { return camera.toView(f.rect) }
+        return camera.toView(Self.outline(of: members)).insetBy(dx: -12, dy: -12)
+    }
+
+    /// The frame whose box (an empty one's), or the strip above it where its name is, is under `p`
+    /// (view coordinates). The name strip is a handle for moving a frame that's full of windows.
     func frame(atView p: CGPoint) -> Frame? {
-        frameBoxes().last { _, box in
-            let r = camera.toView(box)
-            return r.contains(p) || CGRect(x: r.minX, y: r.minY - Self.frameTitleHeight, width: r.width, height: Self.frameTitleHeight).contains(p)
+        frameBoxes().last { f, _ in
+            let r = labelBox(of: f)
+            let strip = CGRect(x: r.minX, y: r.minY - Self.frameTitleHeight, width: r.width, height: Self.frameTitleHeight)
+            return strip.contains(p) || (members(of: f).isEmpty && r.contains(p))
         }?.frame
+    }
+
+    /// The frame these windows are all in, if they're all in the same one.
+    func sharedFrame(of group: [ManagedWindow]) -> Frame? {
+        guard let f = group.first.flatMap(frame(of:)), group.allSatisfy({ $0.frameID == f.id }) else { return nil }
+        return f
+    }
+
+    /// ⌘G on a screen group, a window on its own or the selection: it becomes a named screen,
+    /// kept for AltTab and for later (see Frame). A screen you built is the box exactly; anything
+    /// else gets a screen-sized box centred on it. Already named, it keeps its name. Nil (and a
+    /// toast) for windows too spread out to fit the screen together.
+    @discardableResult
+    func nameScreen(_ ws: [ManagedWindow]) -> Frame? {
+        guard isActive, !gliding, !ws.isEmpty else { return nil }
+        if let f = sharedFrame(of: ws) { return f }
+        let outline = Self.outline(of: ws)
+        guard outline.width <= viewSize.width + 1, outline.height <= viewSize.height + 1 else {
+            Toast.show("Those don't fit on one screen")
+            return nil
+        }
+        let ids = Set(ws.map(\.id))
+        let rect = builtScreens().first { Set($0.members.map(\.0.id)) == ids }?.screen
+            ?? screenRect(at: CGPoint(x: (outline.midX - viewSize.width / 2).rounded(), y: (outline.midY - viewSize.height / 2).rounded()))
+        return makeScreen(rect, members: ws)
+    }
+
+    /// Done with the screen tool (see CanvasView.finishTool): the screen at `rect` is a named
+    /// one, empty or not, with the windows in it that aren't in another. `new`: it wasn't before.
+    @discardableResult
+    func nameScreen(at rect: CGRect) -> (frame: Frame, new: Bool) {
+        if let f = frames.values.first(where: { $0.rect.origin.distance(to: rect.origin) < 1 }) { return (f, false) }
+        return (makeScreen(rect, members: windows.filter { $0.frameID == nil && rect.contains($0.canvasFrame.center) }), true)
+    }
+
+    private func makeScreen(_ rect: CGRect, members: [ManagedWindow]) -> Frame {
+        let f = Frame(name: nextFrameName(), rect: rect)
+        frames[f.id] = f
+        for w in members { w.frameID = f.id }
+        framesChanged()
+        logger.info("named screen of \(members.count) \(f.name, privacy: .public) at \(NSStringFromRect(rect), privacy: .public)")
+        view.render()
+        scheduleSave()
+        return f
+    }
+
+    /// Named screens all of whose windows are among `ws`: moving those windows moves them too.
+    func framesCarried(by ws: [ManagedWindow]) -> [Frame] {
+        let ids = Set(ws.map(\.id))
+        return frames.values.filter { f in
+            let m = members(of: f)
+            return !m.isEmpty && m.allSatisfy { ids.contains($0.id) }
+        }
     }
 
     /// How tall the strip above a frame's box is on screen, at any zoom (see frame(atView:)).
@@ -4832,57 +4898,17 @@ final class CanvasController: NSObject {
         c.toCanvas(CGRect(origin: .zero, size: viewSize)).insetBy(dx: -1, dy: -1).contains(w.canvasFrame)
     }
 
-    /// ⌘G, or New Frame Here: an empty frame the size of the screen (see frameSize), centred on
-    /// `centre` (canvas space; the middle of the view if nil) or, if that's taken, in the nearest
-    /// clear spot. The view moves to show it if it's out of sight.
-    func newFrame(at centre: CGPoint? = nil) {
-        guard isActive, !gliding else { return }
-        let size = frameSize
-        let c = centre ?? camera.center(in: viewSize)
-        let rect = clearSpot(for: CGRect(x: (c.x - size.width / 2).rounded(), y: (c.y - size.height / 2).rounded(),
-                                         width: size.width, height: size.height))
-        let f = Frame(name: nextFrameName(), rect: rect)
-        frames[f.id] = f
-        framesChanged()
-        logger.info("new frame \(f.name, privacy: .public) at \(NSStringFromRect(rect), privacy: .public)")
-        Toast.show("\(f.name): drag windows into it")
-        view.render()
-        if !camera.toCanvas(CGRect(origin: .zero, size: viewSize)).contains(rect) {
-            let room = rect.insetBy(dx: -rect.width / 4, dy: -rect.height / 4)
-            let scale = min(viewSize.width / room.width, viewSize.height / room.height, camera.scale)
-            animate(to: Camera.centered(on: rect.center, scale: max(scale, Camera.minScale), viewSize: viewSize))
-        }
-        scheduleSave()
-    }
-
-    /// `rect` if it's clear of windows and frames; otherwise the clear spot nearest it, beside
-    /// one of them, or past everything.
-    private func clearSpot(for rect: CGRect) -> CGRect {
-        let room = Self.gap * 3
-        let taken = windows.map(\.canvasFrame) + frames.values.map(\.rect)
-        func clear(_ r: CGRect) -> Bool { !taken.contains { $0.insetBy(dx: -room + 0.5, dy: -room + 0.5).intersects(r) } }
-        if clear(rect) { return rect }
-        let size = rect.size
-        let all = taken.reduce(rect) { $0.union($1) }
-        var spots = [CGPoint(x: all.maxX + room, y: rect.minY), CGPoint(x: rect.minX, y: all.maxY + room),
-                     CGPoint(x: all.minX - room - size.width, y: rect.minY), CGPoint(x: rect.minX, y: all.minY - room - size.height)]
-        for o in taken {
-            spots += [CGPoint(x: o.maxX + room, y: o.minY), CGPoint(x: o.minX, y: o.maxY + room),
-                      CGPoint(x: o.minX - room - size.width, y: o.minY), CGPoint(x: o.minX, y: o.minY - room - size.height)]
-        }
-        let best = spots.map { CGRect(origin: $0, size: size) }.filter(clear)
-            .min { $0.center.distance(to: rect.center) < $1.center.distance(to: rect.center) }
-        return best.map { CGRect(x: $0.minX.rounded(), y: $0.minY.rounded(), width: size.width, height: size.height) } ?? rect
-    }
-
-    /// Into the frame at 100%: its view, with its front window focused. From the canvas, or
-    /// from anywhere (picked in a window switcher, see FrameWindows).
+    /// Into the frame at 100%: its view (its group's, as a click on one of its windows shows, when
+    /// its windows are one), with its front window focused. From the canvas, or from anywhere
+    /// (picked in a window switcher, see FrameWindows).
     func goInto(_ f: Frame) {
         logger.info("into \(f.name, privacy: .public)")
+        let front = frontMember(of: f)
+        let target = front.flatMap { screenGroup(of: $0) != nil ? viewCamera(for: $0) : nil } ?? f.camera(on: viewSize)
         if isActive {
-            exit(focus: frontMember(of: f), camera: f.camera(on: viewSize))
+            exit(focus: front, camera: target)
         } else if !gliding, animation == nil {
-            glide(to: frontMember(of: f), camera: f.camera(on: viewSize))
+            glide(to: front, camera: target)
         }
     }
 
@@ -4935,7 +4961,7 @@ final class CanvasController: NSObject {
 
     private func nextFrameName() -> String {
         let taken = Set(frames.values.map(\.name))
-        return (1...).lazy.map { "Frame \($0)" }.first { !taken.contains($0) }!
+        return (1...).lazy.map { "Screen \($0)" }.first { !taken.contains($0) }!
     }
 
     /// Windows in a frame that's been deleted are in none.

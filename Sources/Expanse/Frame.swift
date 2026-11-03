@@ -1,10 +1,14 @@
 import CoreGraphics
 import Foundation
 
-/// A frame: a box on the canvas the size of the screen, holding the windows you put in it. At
-/// 100% it's a desktop: its view is the box, and focusing one of its windows keeps it there,
-/// rather than centring that window. Zoomed out it's one unit: a click goes into it, dragging the
-/// box moves it with its windows, Tidy Up leaves its inside alone.
+/// A named screen ("frame" in the code): a screen-sized place on the canvas with a name, kept in
+/// the layout and listed in window switchers (see FrameWindows). It's what a screen group (see
+/// CanvasController.screenGroups) or the screen tool's screen becomes when named: ⌘G names the
+/// group, window or selection under the pointer, and finishing the screen tool names its screen.
+/// At 100% it's a desktop: its view is the screen, and focusing one of its windows keeps it there,
+/// rather than centring that window. Zoomed out it's one unit: a click goes into it, dragging it
+/// (or all its windows) moves it with its windows, Tidy Up leaves its inside alone. An empty one
+/// is drawn as a box to put windows in.
 ///
 /// A window is in a frame when it's put down (dragged on the canvas, or for real at 100%) with
 /// its middle inside the box. Membership lives on the windows (ManagedWindow.frameID), so it goes

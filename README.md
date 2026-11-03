@@ -30,7 +30,7 @@
 
 ## What's in the fork?
 - Slightly different zooming behavior. Zooms out about 50% from the current window instead of all the way out. Less jarring.
-- Frames! Create a frame while zoomed out and put windows in it. You can then return to that frame/layout instead of zooming and centering on the individual apps
+- Named screens! Zoomed out, hover a group of windows, a single window or a selection and press <kbd>⌘</kbd> <kbd>G</kbd> (or right-click → Name this screen…) to give it a name. On empty canvas, <kbd>⌘</kbd> <kbd>G</kbd> (or right-click → New screen) starts a new screen; when you're done filling it, it's named too, even if it's empty. Names are kept across restarts and show up in AltTab, so you can jump straight back to that layout. Moving a named screen's windows (dragging its ring, or a selection) moves the screen with them; right-click → Arrange windows in… reopens the screen tool on it
 - Dotfiles-based configuration
 
 ## Planned Features

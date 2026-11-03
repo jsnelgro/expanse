@@ -38,8 +38,8 @@ enum Shortcuts {
             case .selectAll: "Select every window"
             case .close: "Close the selected windows, or the one under the pointer"
             case .pan: "Hold and drag to move around the canvas"
-            case .newFrame: "Make a frame the size of the screen, under the pointer"
-            case .deleteFrame: "Delete the frame under the pointer (its windows stay)"
+            case .newFrame: "Name the screen under the pointer (the selection, a group or a window), or start a new one"
+            case .deleteFrame: "Delete the named screen under the pointer (its windows stay)"
             case .canvasLeft, .canvasRight, .canvasUp, .canvasDown: "Move to the nearest window that way"
             }
         }
